@@ -1,0 +1,38 @@
+{
+  "name": "qatool",
+  "version": "1.0.0",
+  "description": "AI-powered UI automation tool for intelligent website testing and analysis",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "cost": "tsx src/cost-calculator.ts",
+    "setup": "npm install && npx playwright install chromium",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "automation",
+    "testing",
+    "ai",
+    "playwright",
+    "vision"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "openai": "^4.20.0",
+    "dotenv": "^16.3.1",
+    "chalk": "^5.3.0",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/yargs": "^17.0.24",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0"
+  }
+}
+

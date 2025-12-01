@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+screenshots/
+output/
+*.png
+*.jpg
+*.jpeg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db

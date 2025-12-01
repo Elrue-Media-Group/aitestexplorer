@@ -1,0 +1,252 @@
+{
+  "siteName": "LayoffLens",
+  "domain": "layofflens.com",
+  "description": "News aggregator site hosted in Azure that tracks information on layoffs and surrounding fields such as resumes, interview tips, and career advice",
+  "primaryPurpose": "News aggregation and tracking",
+  "technology": {
+    "framework": "React",
+    "hosting": "Azure",
+    "architecture": "Single Page Application (SPA)"
+  },
+  
+  "contentNature": "dynamic",
+  "updateFrequency": "periodic",
+  "updateSchedule": {
+    "frequency": "twice daily",
+    "times": ["7:00 AM", "7:00 PM"],
+    "method": "Separate query runs to update feeds",
+    "whatUpdates": "News and video feeds are refreshed"
+  },
+  "contentPatterns": [
+    "feed-based",
+    "aggregated from multiple sources",
+    "scheduled updates",
+    "news and video content"
+  ],
+  
+  "keyPages": [
+    {
+      "url": "/",
+      "name": "Homepage",
+      "description": "Main feed showing current layoff news and videos",
+      "importantElements": [
+        "Filter buttons: All, News, Video",
+        "Topic filters: Interview Tips, Resume Writing, ATS, Layoffs, AI, Job Search, Career Advice, Unemployment",
+        "Current Feed section (small current view)",
+        "Article and video cards"
+      ]
+    },
+    {
+      "url": "/current",
+      "name": "Current",
+      "description": "Small current view of latest items",
+      "importantElements": ["Recent items feed", "Filter options"]
+    },
+    {
+      "url": "/archive",
+      "name": "Archive",
+      "description": "Historical data showing last 500 items",
+      "importantElements": ["Last 500 items", "Historical feed", "Navigation"]
+    },
+    {
+      "url": "/analytics",
+      "name": "Analytics",
+      "description": "AI-generated interesting information about articles - changes often",
+      "importantElements": [
+        "Weekly Trends (AI-generated, changes frequently)",
+        "Top Companies Mentioned (AI-generated, changes frequently)",
+        "Analytics charts and insights"
+      ],
+      "note": "Content is AI-generated and changes often - test structure, not specific content"
+    },
+    {
+      "url": "/about",
+      "name": "About",
+      "description": "Information about the site",
+      "importantElements": ["Site information", "Static content"]
+    }
+  ],
+  
+  "terminology": {
+    "filters": {
+      "contentType": ["All", "News", "Video"],
+      "topics": [
+        "Interview Tips",
+        "Resume Writing",
+        "ATS",
+        "Layoffs",
+        "AI",
+        "Job Search",
+        "Career Advice",
+        "Unemployment"
+      ]
+    },
+    "sections": ["Current Feed", "Archive", "Analytics", "About"],
+    "contentTypes": ["News Articles", "Videos", "Trends", "Analytics"]
+  },
+  
+  "testingGuidance": {
+    "testThese": [
+      "Navigation links (Current, Archive, Analytics, About)",
+      "Content type filter buttons (All, News, Video) functionality",
+      "Topic filter buttons (Interview Tips, Resume Writing, ATS, etc.) functionality",
+      "Feed structure and loading",
+      "Current page shows small current view",
+      "Archive page shows last 500 items",
+      "Analytics page structure (sections exist, not specific content)",
+      "Page load times and responsiveness",
+      "Filter combinations work correctly"
+    ],
+    "dontTestThese": [
+      "Specific article titles or headlines (change with updates)",
+      "Specific video titles (change with updates)",
+      "Exact trending topic names in Analytics (AI-generated, changes often)",
+      "Specific company names in Analytics (AI-generated, changes often)",
+      "Exact numbers in Analytics (AI-generated, changes often)",
+      "Specific timestamps or dates",
+      "Exact article count (varies with updates)"
+    ],
+    "testStructure": true,
+    "testSpecificContent": false,
+    "priority": "Test functionality, filters, and structure. Do NOT test specific content that changes with scheduled updates or AI generation.",
+    "specialNotes": [
+      "Analytics page content is AI-generated and changes often - only test that sections exist and structure is correct",
+      "Feeds update twice daily at 7am and 7pm - content will vary between runs",
+      "Archive shows last 500 items - exact items will change",
+      "Current shows small current view - exact items will change"
+    ]
+  },
+  
+  "knownBehaviors": [
+    "Content updates twice daily at 7:00 AM and 7:00 PM via separate query",
+    "News and video feeds are aggregated from multiple sources",
+    "Filter buttons update content client-side (React SPA)",
+    "Topic filters allow filtering by category (Interview Tips, Resume Writing, ATS, etc.)",
+    "Content type filters allow filtering by News or Video",
+    "Current page shows a small current view of latest items",
+    "Archive page shows the last 500 items",
+    "Analytics page content is AI-generated and changes frequently",
+    "Site is a React single-page application",
+    "No user authentication required - all content public",
+    "External article links may open in new tabs"
+  ],
+  
+  "updatePatterns": {
+    "articleFeed": {
+      "frequency": "twice daily (7am, 7pm)",
+      "whatChanges": "Article titles, sources, publication dates, content, video titles",
+      "whatStaysSame": "Feed structure, filter buttons, page layout, navigation, topic filters"
+    },
+    "analyticsPage": {
+      "frequency": "changes often (AI-generated)",
+      "whatChanges": "Trending topics, company names, statistics, insights, charts data",
+      "whatStaysSame": "Page structure, section layout, chart types, navigation"
+    },
+    "archivePage": {
+      "frequency": "updates with feed updates",
+      "whatChanges": "Items in the last 500 list, article titles, dates",
+      "whatStaysSame": "Archive structure, navigation, page layout"
+    }
+  },
+  
+  "userWorkflows": [
+    {
+      "name": "Browse Latest News",
+      "description": "User wants to see latest layoff news",
+      "steps": [
+        "Navigate to homepage",
+        "Click 'News' filter button",
+        "Browse article feed"
+      ],
+      "priority": "high"
+    },
+    {
+      "name": "Filter by Topic",
+      "description": "User wants to see content about a specific topic",
+      "steps": [
+        "Navigate to homepage",
+        "Click topic filter (e.g., 'Interview Tips', 'Resume Writing', 'ATS')",
+        "View filtered content"
+      ],
+      "priority": "high"
+    },
+    {
+      "name": "View Videos",
+      "description": "User wants to see video content only",
+      "steps": [
+        "Navigate to homepage",
+        "Click 'Video' filter button",
+        "Browse video feed"
+      ],
+      "priority": "medium"
+    },
+    {
+      "name": "View Current Items",
+      "description": "User wants to see small current view",
+      "steps": [
+        "Navigate to Current page",
+        "View latest items in small current view"
+      ],
+      "priority": "medium"
+    },
+    {
+      "name": "Browse Archive",
+      "description": "User wants to see historical data",
+      "steps": [
+        "Navigate to Archive page",
+        "Browse last 500 items"
+      ],
+      "priority": "medium"
+    },
+    {
+      "name": "View Analytics",
+      "description": "User wants to see trends and insights",
+      "steps": [
+        "Navigate to Analytics page",
+        "View Weekly Trends section",
+        "Check Top Companies section",
+        "Note: Content is AI-generated and changes often"
+      ],
+      "priority": "low",
+      "note": "Test structure only, not specific content"
+    }
+  ],
+  
+  "filterBehavior": {
+    "contentTypeFilters": {
+      "All": "Shows both news and video content",
+      "News": "Shows only news articles",
+      "Video": "Shows only video content"
+    },
+    "topicFilters": [
+      "Interview Tips",
+      "Resume Writing",
+      "ATS",
+      "Layoffs",
+      "AI",
+      "Job Search",
+      "Career Advice",
+      "Unemployment"
+    ],
+    "filterInteraction": "Filters update content client-side without page reload (React SPA)",
+    "filterCombinations": "Content type and topic filters can be combined"
+  },
+  
+  "contentAreas": {
+    "dynamic": [
+      "Article feed (updates twice daily)",
+      "Video feed (updates twice daily)",
+      "Analytics insights (AI-generated, changes often)",
+      "Trending topics (changes frequently)",
+      "Top companies (changes frequently)"
+    ],
+    "static": [
+      "Navigation structure",
+      "Filter buttons",
+      "Page layouts",
+      "Section structures",
+      "About page content"
+    ]
+  }
+}
+
