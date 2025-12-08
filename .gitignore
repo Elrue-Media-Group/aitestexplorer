@@ -23,3 +23,7 @@ Thumbs.db
 
 # Internal review documents
 PUBLIC_RELEASE_CHECKLIST.md
+
+# Context files (keep template.json, ignore all others)
+context/*.json
+!context/template.json

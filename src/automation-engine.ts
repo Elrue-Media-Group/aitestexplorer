@@ -756,4 +756,3 @@ export class AutomationEngine {
     return this.browser;
   }
 }
-
