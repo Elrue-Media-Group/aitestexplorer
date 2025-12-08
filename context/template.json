@@ -1,0 +1,22 @@
+{
+  "siteName": "Your Site Name",
+  "domain": "example.com",
+  
+  "siteDescription": "A clear, concise description of what your website does, its primary purpose, and key functionality. This helps the AI understand the site's context when generating tests.",
+  
+  "importantTests": [
+    {
+      "name": "Test Name",
+      "description": "Describe in plain English what this test should verify. The AI will convert this into structured test steps. Be specific about what should be tested and what the expected behavior is.",
+      "page": "/optional-page-path",
+      "priority": "high"
+    }
+  ],
+  
+  "_notes": {
+    "siteDescription": "Use this to provide context about your site's purpose, content nature (static/dynamic), update patterns, and any special behaviors the AI should know about.",
+    "importantTests": "List any specific test scenarios you want to ensure are always generated. Each test should have a name and description. The AI will convert these into structured test cases.",
+    "priority": "Optional: 'high', 'medium', or 'low'. Defaults to 'medium' if not specified."
+  }
+}
+

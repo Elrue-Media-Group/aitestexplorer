@@ -20,3 +20,6 @@ output/
 
 # OS files
 Thumbs.db
+
+# Internal review documents
+PUBLIC_RELEASE_CHECKLIST.md

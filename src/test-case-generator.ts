@@ -1,3 +1,13 @@
+/**
+ * Test Case Generator
+ * 
+ * Generates test cases from website exploration data using AI.
+ * Combines:
+ * - AI-generated test cases based on discovered elements
+ * - Custom test cases from context files
+ * - Validation against actual page elements
+ */
+
 import { PageState, TestCase } from './types.js';
 import { AIVisionService } from './ai-vision.js';
 import { Config } from './types.js';
@@ -64,12 +74,14 @@ export class TestCaseGenerator {
     const aiTestCases = await this.generateWithAI(pageInfo, startUrl, aggregatedSiteContext);
     
     // Check for custom test cases from context file
+    // Support both old 'customTestCases' and new 'importantTests' fields
     const contextFile = (siteContext as any)?.contextFile;
     let customTestCases: GeneratedTestCase[] = [];
-    if (contextFile?.customTestCases && Array.isArray(contextFile.customTestCases)) {
-      console.log(`📋 Found ${contextFile.customTestCases.length} custom test case(s) in context file`);
+    const testCasesFromFile = contextFile?.importantTests || contextFile?.customTestCases;
+    if (testCasesFromFile && Array.isArray(testCasesFromFile)) {
+      console.log(`📋 Found ${testCasesFromFile.length} custom test case(s) in context file`);
       customTestCases = await this.convertCustomTestCases(
-        contextFile.customTestCases,
+        testCasesFromFile,
         pageInfo,
         startUrl
       );
@@ -367,8 +379,10 @@ export class TestCaseGenerator {
       if (contextFile.siteName) {
         context += `Site Name: ${contextFile.siteName}\n`;
       }
-      if (contextFile.description) {
-        context += `Description: ${contextFile.description}\n`;
+      // Support both old 'description' and new 'siteDescription' fields
+      const description = contextFile.siteDescription || contextFile.description;
+      if (description) {
+        context += `Description: ${description}\n`;
       }
       if (contextFile.primaryPurpose) {
         context += `Primary Purpose: ${contextFile.primaryPurpose}\n`;
@@ -397,7 +411,11 @@ export class TestCaseGenerator {
           context += `  Topic Filters: ${contextFile.filterBehavior.topicFilters.slice(0, 5).join(', ')}\n`;
         }
       }
-      if (contextFile.testingGuidance) {
+      // Support both old testingGuidance object and new testingNotes field
+      if (contextFile.testingNotes) {
+        context += `\n📝 Testing Notes from Context File:\n`;
+        context += `  ${contextFile.testingNotes}\n`;
+      } else if (contextFile.testingGuidance) {
         context += `\n📝 Testing Guidance from Context File:\n`;
         if (contextFile.testingGuidance.testThese) {
           context += `  Test These: ${contextFile.testingGuidance.testThese.slice(0, 5).join(', ')}\n`;
@@ -786,8 +804,8 @@ REMEMBER: Generate 10-15 test cases total. Create separate test cases for:
           timestamp: new Date().toISOString(),
           operation: 'generateTestCases',
           model: this.config.openaiModel,
-          prompt: prompt.substring(0, 2000) + (prompt.length > 2000 ? '...' : ''),
-          response: content, // Store full response, not truncated
+          prompt: prompt, // Store full prompt
+          response: content, // Store full response
           tokenUsage: response.usage ? {
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,

@@ -11,7 +11,23 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 
 /**
- * Run test analysis - extracted from index.ts to be callable from API
+ * Test Runner
+ * 
+ * Orchestrates the complete test analysis workflow:
+ * 1. Website exploration
+ * 2. AI vision analysis
+ * 3. Test case generation
+ * 4. Test execution
+ * 5. Results formatting
+ * 
+ * Can be called from both CLI and API endpoints.
+ * 
+ * @param url - Target website URL to analyze
+ * @param maxPages - Maximum number of pages to explore
+ * @param maxActions - Maximum number of interactive actions to perform
+ * @param headless - Run browser in headless mode
+ * @param runId - Optional run ID for tracking (auto-generated if not provided)
+ * @returns Promise with runId and success status
  */
 export async function runTestAnalysis(
   url: string,

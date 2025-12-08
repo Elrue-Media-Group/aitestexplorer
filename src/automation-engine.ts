@@ -1,3 +1,14 @@
+/**
+ * Automation Engine
+ * 
+ * Handles website exploration using Playwright, including:
+ * - Navigation and page discovery
+ * - Screenshot capture
+ * - AI-powered page analysis
+ * - Interactive element discovery
+ * - Action execution (clicks, form fills, etc.)
+ */
+
 import { Browser, Page, chromium } from 'playwright';
 import { Config, PageState, Action, VisionAnalysis } from './types.js';
 import { AIVisionService } from './ai-vision.js';
@@ -185,7 +196,9 @@ export class AutomationEngine {
     this.visitedUrls.add(this.normalizeUrl(startUrl));
 
     console.log(`\n🔍 Starting exploration: maxPages=${this.config.maxPages}, maxActions=${this.config.maxActions}`);
-    while (urlsToVisit.length > 0 && pages.length < this.config.maxPages && this.actionCount < this.config.maxActions) {
+    // Note: maxActions limits actions per page, not total exploration
+    // Continue exploring pages until maxPages is reached, but limit actions per page to maxActions
+    while (urlsToVisit.length > 0 && pages.length < this.config.maxPages) {
       console.log(`\n🔍 Loop iteration: urlsToVisit=${urlsToVisit.length}, pages=${pages.length}, actionCount=${this.actionCount}`);
       const currentUrl = urlsToVisit.shift()!;
       
@@ -331,30 +344,39 @@ export class AutomationEngine {
     const analysis = await this.visionService.analyzePage(screenshotPath, url, previousActions);
 
     // Perform actions based on AI suggestions
+    // maxActions limits the total number of actions across ALL pages
     const actions: Action[] = [];
-    const maxActionsPerPage = 5;
+    const maxActionsPerPage = Math.min(5, this.config.maxActions - this.actionCount);
     
     for (const suggestion of analysis.suggestedActions.slice(0, maxActionsPerPage)) {
-      if (this.actionCount >= this.config.maxActions) break;
+      if (this.actionCount >= this.config.maxActions) {
+        console.log(`⚠️  Reached maxActions limit (${this.config.maxActions}), stopping action execution on this page`);
+        break;
+      }
 
       try {
         const action = await this.performAction(suggestion, analysis);
-        if (action) {
+        if (action && action.type !== 'wait') {
+          // Only count non-wait actions (clicks, types, scrolls, etc.)
+          // Wait actions are placeholders and shouldn't count toward maxActions
           actions.push(action);
           this.actionCount++;
+          console.log(`✅ Performed action ${this.actionCount}/${this.config.maxActions}: ${action.description}`);
           
           // Wait a bit between actions
           await this.page!.waitForTimeout(1000);
+        } else if (action && action.type === 'wait') {
+          // Log wait actions but don't count them
+          actions.push(action);
+          console.log(`⏸️  Wait action (not counted): ${action.description}`);
+        } else {
+          console.log(`⚠️  Could not perform action: ${suggestion.action} (no matching elements found)`);
+          // Don't count failed/null actions - they're not real interactions
         }
       } catch (error) {
         console.error(`Error performing action: ${suggestion.action}`, error);
-        actions.push({
-          type: 'wait',
-          description: suggestion.action,
-          timestamp: new Date(),
-          success: false,
-          error: String(error),
-        });
+        // Don't count failed actions as real actions - they didn't actually interact
+        // Only log for debugging, but don't increment actionCount
       }
     }
 
@@ -615,19 +637,47 @@ export class AutomationEngine {
           timestamp,
           success: true,
         };
-      } else if (actionLower.includes('navigate') || actionLower.includes('link')) {
-        // Already handled in exploreWebsite
+      } else if (actionLower.includes('navigate') || actionLower.includes('explore navigation')) {
+        // "Explore navigation" should actually click on navigation links
+        // Find navigation links and click one
+        const navLinks = await this.page.$$('nav a[href], header a[href], [role="navigation"] a[href]');
+        const sameDomainNavLinks = [];
+        
+        for (const link of navLinks) {
+          const href = await link.getAttribute('href');
+          if (href) {
+            try {
+              const currentUrl = this.page!.url();
+              const absoluteUrl = new URL(href, currentUrl).href;
+              if (this.isSameDomain(absoluteUrl, currentUrl)) {
+                sameDomainNavLinks.push(link);
+              }
+            } catch {
+              continue;
+            }
+          }
+        }
+        
+        if (sameDomainNavLinks.length > 0) {
+          const selectedLink = sameDomainNavLinks[Math.floor(Math.random() * sameDomainNavLinks.length)];
+          const text = await selectedLink.textContent();
+          await selectedLink.click();
+          
+          return {
+            type: 'click',
+            target: text || 'navigation link',
+            description: `Clicked navigation link: ${text || 'link'}`,
+            timestamp,
+            success: true,
+          };
+        }
+        // If no navigation links found, return null (don't count as action)
         return null;
       }
 
-      // Default: wait
-      await this.page.waitForTimeout(1000);
-      return {
-        type: 'wait',
-        description: suggestion.action,
-        timestamp,
-        success: true,
-      };
+      // Default: return null for unrecognized actions (don't count them)
+      console.log(`⚠️  Unrecognized action type: ${suggestion.action} - skipping`);
+      return null;
     } catch (error) {
       return {
         type: 'wait',

@@ -23,8 +23,16 @@
     "playwright",
     "vision"
   ],
-  "author": "",
+  "author": "Tony Cerrato",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/qatool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/qatool/issues"
+  },
+  "homepage": "https://github.com/yourusername/qatool#readme",
   "dependencies": {
     "playwright": "^1.40.0",
     "openai": "^4.20.0",

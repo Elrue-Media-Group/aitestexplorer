@@ -1,8 +1,21 @@
+/**
+ * Configuration Management
+ * 
+ * Loads configuration from environment variables with sensible defaults.
+ * Required: OPENAI_API_KEY
+ * Optional: Model selection, limits, directories, headless mode
+ */
+
 import dotenv from 'dotenv';
 import { Config } from './types.js';
 
 dotenv.config();
 
+/**
+ * Load and validate configuration from environment variables
+ * @returns Config object with all settings
+ * @throws Error if OPENAI_API_KEY is not set
+ */
 export function loadConfig(): Config {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {

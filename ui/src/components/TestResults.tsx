@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface TestRun {
   runId: string;
@@ -9,21 +10,9 @@ interface TestRun {
   failCount: number;
 }
 
-interface TestResult {
-  runId: string;
-  results: {
-    'test-cases.md'?: string;
-    'test-results.md'?: string;
-    'site-analysis.md'?: string;
-    'ai-reasoning.md'?: string;
-  };
-  screenshots: string[];
-}
-
 const TestResults: React.FC = () => {
+  const navigate = useNavigate();
   const [runs, setRuns] = useState<TestRun[]>([]);
-  const [selectedRun, setSelectedRun] = useState<string | null>(null);
-  const [resultData, setResultData] = useState<TestResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -32,12 +21,6 @@ const TestResults: React.FC = () => {
     const interval = setInterval(loadRuns, 5000); // Refresh every 5 seconds
     return () => clearInterval(interval);
   }, []);
-
-  useEffect(() => {
-    if (selectedRun) {
-      loadResult(selectedRun);
-    }
-  }, [selectedRun]);
 
   const loadRuns = async () => {
     try {
@@ -49,16 +32,6 @@ const TestResults: React.FC = () => {
     } finally {
       setLoading(false);
       setRefreshing(false);
-    }
-  };
-
-  const loadResult = async (runId: string) => {
-    try {
-      const response = await fetch(`/api/runs/${runId}`);
-      const data = await response.json();
-      setResultData(data);
-    } catch (error) {
-      console.error('Failed to load result:', error);
     }
   };
 
@@ -74,15 +47,6 @@ const TestResults: React.FC = () => {
     } catch {
       return dateString;
     }
-  };
-
-  const renderMarkdown = (content: string) => {
-    // Simple markdown rendering (you could use a library like react-markdown)
-    return (
-      <div className="markdown-content">
-        <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{content}</pre>
-      </div>
-    );
   };
 
   return (
@@ -130,7 +94,7 @@ const TestResults: React.FC = () => {
                   <td>
                     <button
                       className="btn btn-secondary btn-small"
-                      onClick={() => setSelectedRun(run.runId)}
+                      onClick={() => navigate(`/results/${run.runId}`)}
                     >
                       View
                     </button>
@@ -141,67 +105,6 @@ const TestResults: React.FC = () => {
           </table>
         )}
       </div>
-
-      {selectedRun && resultData && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-            <h2>Run Details: {selectedRun}</h2>
-            <button className="btn btn-secondary btn-small" onClick={() => setSelectedRun(null)}>
-              Close
-            </button>
-          </div>
-
-          <div style={{ marginBottom: '20px' }}>
-            <h3 style={{ marginBottom: '10px' }}>Test Cases</h3>
-            {resultData.results['test-cases.md'] ? (
-              <div className="code-block" style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                {renderMarkdown(resultData.results['test-cases.md'])}
-              </div>
-            ) : (
-              <div className="loading">Test cases not available</div>
-            )}
-          </div>
-
-          <div style={{ marginBottom: '20px' }}>
-            <h3 style={{ marginBottom: '10px' }}>Test Results</h3>
-            {resultData.results['test-results.md'] ? (
-              <div className="code-block" style={{ maxHeight: '600px', overflowY: 'auto' }}>
-                {renderMarkdown(resultData.results['test-results.md'])}
-              </div>
-            ) : (
-              <div className="loading">Test results not available</div>
-            )}
-          </div>
-
-          <div style={{ marginBottom: '20px' }}>
-            <h3 style={{ marginBottom: '10px' }}>Site Analysis</h3>
-            {resultData.results['site-analysis.md'] ? (
-              <div className="code-block" style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                {renderMarkdown(resultData.results['site-analysis.md'])}
-              </div>
-            ) : (
-              <div className="loading">Site analysis not available</div>
-            )}
-          </div>
-
-          {resultData.screenshots.length > 0 && (
-            <div>
-              <h3 style={{ marginBottom: '10px' }}>Screenshots</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px' }}>
-                {resultData.screenshots.map((screenshot, idx) => (
-                  <a key={idx} href={screenshot} target="_blank" rel="noopener noreferrer">
-                    <img
-                      src={screenshot}
-                      alt={`Screenshot ${idx + 1}`}
-                      style={{ width: '100%', height: 'auto', borderRadius: '4px', border: '1px solid #ddd' }}
-                    />
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 };

@@ -270,9 +270,16 @@ npm run cost -- --quick
 
 ## License
 
-MIT
+MIT License - see [LICENSE](./LICENSE) file for details.
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Security
+
+- **No API keys or secrets** are stored in the repository
+- All sensitive configuration is loaded from environment variables
+- See `env.template` for required environment variables
+- Never commit your `.env` file
 

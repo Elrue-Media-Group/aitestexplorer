@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import ContextEditor from './ContextEditor';
 
 interface ContextFile {
   domain: string;
@@ -9,7 +10,6 @@ const ContextManager: React.FC = () => {
   const [files, setFiles] = useState<ContextFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [content, setContent] = useState<any>(null);
-  const [editedContent, setEditedContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -43,43 +43,36 @@ const ContextManager: React.FC = () => {
       const response = await fetch(`/api/context/${domain}`);
       const data = await response.json();
       setContent(data);
-      setEditedContent(JSON.stringify(data, null, 2));
     } catch (error) {
       console.error('Failed to load context file:', error);
       setMessage({ type: 'error', text: 'Failed to load context file' });
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = async (data: any) => {
     if (!selectedFile) return;
 
-    setSaving(true);
     setMessage(null);
 
     try {
-      const parsed = JSON.parse(editedContent);
       const response = await fetch(`/api/context/${selectedFile}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(parsed),
+        body: JSON.stringify(data),
       });
 
       if (response.ok) {
         setMessage({ type: 'success', text: 'Context file saved successfully' });
-        setContent(parsed);
+        setContent(data);
       } else {
         const data = await response.json();
         setMessage({ type: 'error', text: data.error || 'Failed to save context file' });
+        throw new Error(data.error || 'Failed to save');
       }
     } catch (error) {
-      setMessage({
-        type: 'error',
-        text: error instanceof Error ? error.message : 'Invalid JSON',
-      });
-    } finally {
-      setSaving(false);
+      throw error;
     }
   };
 
@@ -99,7 +92,6 @@ const ContextManager: React.FC = () => {
         if (selectedFile === domain) {
           setSelectedFile(null);
           setContent(null);
-          setEditedContent('');
         }
       } else {
         const data = await response.json();
@@ -126,16 +118,8 @@ const ContextManager: React.FC = () => {
       const defaultContent = {
         siteName: newDomain,
         domain: newDomain,
-        description: '',
-        primaryPurpose: '',
-        technologyStack: [],
-        contentNature: 'dynamic',
-        keyPages: [],
-        testingGuidance: {
-          whatToTest: [],
-          whatNotToTest: [],
-        },
-        customTestCases: [],
+        siteDescription: '',
+        importantTests: [],
       };
 
       const response = await fetch(`/api/context/${newDomain}`, {
@@ -170,7 +154,12 @@ const ContextManager: React.FC = () => {
     <div>
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h2>Context Files</h2>
+          <div>
+            <h2 style={{ margin: 0 }}>Context Files</h2>
+            <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '14px' }}>
+              Provide site descriptions and important tests to improve test generation
+            </p>
+          </div>
           <button
             className="btn btn-primary btn-small"
             onClick={() => setShowNewForm(!showNewForm)}
@@ -246,38 +235,16 @@ const ContextManager: React.FC = () => {
         )}
       </div>
 
-      {selectedFile && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-            <h2>Edit Context: {selectedFile}</h2>
-            <button className="btn btn-secondary btn-small" onClick={() => setSelectedFile(null)}>
-              Close
-            </button>
-          </div>
-
-          {editedContent && (
-            <>
-              <div className="form-group">
-                <label htmlFor="content">Context File Content (JSON)</label>
-                <textarea
-                  id="content"
-                  rows={20}
-                  value={editedContent}
-                  onChange={(e) => setEditedContent(e.target.value)}
-                  style={{ fontFamily: 'monospace', fontSize: '13px' }}
-                />
-              </div>
-
-              <button
-                className="btn btn-primary"
-                onClick={handleSave}
-                disabled={saving}
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
-            </>
-          )}
-        </div>
+      {selectedFile && content && (
+        <ContextEditor
+          domain={selectedFile}
+          initialData={content}
+          onSave={handleSave}
+          onCancel={() => {
+            setSelectedFile(null);
+            setContent(null);
+          }}
+        />
       )}
     </div>
   );

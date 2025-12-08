@@ -564,11 +564,33 @@ export class OutputGenerator {
         content += `\n`;
       }
 
+      // Format prompt (can be long, so show in code block)
       content += `### Prompt Sent to AI\n\n`;
-      content += `\`\`\`\n${log.prompt}\n\`\`\`\n\n`;
+      if (log.operation === 'analyzePage' || log.operation === 'generateReport') {
+        // For analysis operations, show prompt in a more readable way
+        content += `<details>\n<summary>View Full Prompt (${log.prompt.length} characters)</summary>\n\n`;
+        content += `\`\`\`\n${log.prompt}\n\`\`\`\n\n`;
+        content += `</details>\n\n`;
+      } else {
+        content += `\`\`\`\n${log.prompt}\n\`\`\`\n\n`;
+      }
 
+      // Format response based on operation type
       content += `### AI Response\n\n`;
-      content += `\`\`\`\n${log.response}\n\`\`\`\n\n`;
+      if (log.operation === 'analyzePage') {
+        // For page analysis, format as markdown (not code block) so it's readable
+        // The AI response contains structured analysis that should be readable
+        content += `${log.response}\n\n`;
+        content += `\n<details>\n<summary>View Raw Response</summary>\n\n`;
+        content += `\`\`\`\n${log.response}\n\`\`\`\n\n`;
+        content += `</details>\n\n`;
+      } else if (log.operation === 'generateReport') {
+        // For reports, also format as markdown for readability
+        content += `${log.response}\n\n`;
+      } else {
+        // For test cases and other structured outputs, show in code block
+        content += `\`\`\`json\n${log.response}\n\`\`\`\n\n`;
+      }
 
       content += `---\n\n`;
     }

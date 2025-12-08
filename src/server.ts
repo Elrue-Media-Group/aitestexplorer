@@ -1,5 +1,17 @@
 #!/usr/bin/env node
 
+/**
+ * Express API Server
+ * 
+ * Provides REST API endpoints for:
+ * - Running test analyses
+ * - Viewing test results
+ * - Managing context files
+ * - Serving the React UI
+ * 
+ * Runs on port 3000 by default (configurable via PORT env var)
+ */
+
 import express from 'express';
 import cors from 'cors';
 import { join, dirname } from 'path';

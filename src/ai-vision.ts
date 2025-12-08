@@ -1,3 +1,15 @@
+/**
+ * AI Vision Service
+ * 
+ * Handles AI-powered analysis of website screenshots using OpenAI's vision models.
+ * Provides:
+ * - Page analysis and description
+ * - Interactive element detection
+ * - Suggested actions for exploration
+ * - Site report generation
+ * - Reasoning log for debugging and transparency
+ */
+
 import OpenAI from 'openai';
 import { readFileSync } from 'fs';
 import { writeFile } from 'fs/promises';
@@ -124,18 +136,19 @@ Be specific and actionable. For each interactive element, describe what it likel
 
       const content = response.choices[0]?.message?.content || '';
       
-      // Log reasoning
+      // Log reasoning - store FULL response to capture site understanding
       await this.logReasoning({
         timestamp: new Date().toISOString(),
         operation: 'analyzePage',
         model: this.model,
-        prompt: prompt.substring(0, 2000) + (prompt.length > 2000 ? '...' : ''), // Truncate for readability
-        response: content.substring(0, 2000) + (content.length > 2000 ? '...' : ''), // Truncate for readability
+        prompt: prompt, // Full prompt - contains site understanding questions
+        response: content, // Full response - contains AI's understanding of the site
         tokenUsage: response.usage ? {
           prompt_tokens: response.usage.prompt_tokens,
           completion_tokens: response.usage.completion_tokens,
           total_tokens: response.usage.total_tokens,
         } : undefined,
+        finishReason: response.choices[0]?.finish_reason,
         metadata: {
           url,
           screenshotPath,
@@ -343,18 +356,19 @@ Format as clear, structured text. Do not include test cases (those are generated
 
       const content = response.choices[0]?.message?.content || '';
       
-      // Log reasoning
+      // Log reasoning - store FULL response to capture site description and suggestions
       await this.logReasoning({
         timestamp: new Date().toISOString(),
         operation: 'generateReport',
         model: this.model,
-        prompt: prompt.substring(0, 2000) + (prompt.length > 2000 ? '...' : ''), // Truncate for readability
-        response: content.substring(0, 2000) + (content.length > 2000 ? '...' : ''), // Truncate for readability
+        prompt: prompt, // Full prompt
+        response: content, // Full response - contains site description and suggestions
         tokenUsage: response.usage ? {
           prompt_tokens: response.usage.prompt_tokens,
           completion_tokens: response.usage.completion_tokens,
           total_tokens: response.usage.total_tokens,
         } : undefined,
+        finishReason: response.choices[0]?.finish_reason,
         metadata: {
           pagesVisited: pagesVisited.length,
           actionsCount: actions.length,
