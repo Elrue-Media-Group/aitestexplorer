@@ -247,6 +247,16 @@
       "Section structures",
       "About page content"
     ]
-  }
+  },
+  
+  "customTestCases": [
+    {
+      "name": "Analytics Top Companies Filter Count Verification",
+      "description": "On the analytics page, the 'Top Companies Mentioned' section contains clickable filters. Each filter shows a company name with a mention count (e.g., 'Apple 8 mentions' or 'Microsoft 5 mentions'). When a filter is clicked, the number of articles displayed should match the count shown on the filter. For example, if a filter says 'Apple 8 mentions', clicking it should display exactly 8 articles.",
+      "page": "/analytics",
+      "priority": "high"
+    }
+  ],
+  "_customTestCasesNote": "Custom test cases allow you to specify test scenarios in plain English. The AI will convert these descriptions into structured test steps. Each test case should have: name (required), description (required, plain English), page (optional, URL path), and priority (optional, 'high', 'medium', or 'low')."
 }
 

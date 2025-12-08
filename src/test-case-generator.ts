@@ -61,10 +61,25 @@ export class TestCaseGenerator {
     const aggregatedSiteContext = this.aggregateSiteCharacteristics(pages, siteContext);
 
     // Use AI to generate test cases based on what was ACTUALLY discovered
-    const testCases = await this.generateWithAI(pageInfo, startUrl, aggregatedSiteContext);
+    const aiTestCases = await this.generateWithAI(pageInfo, startUrl, aggregatedSiteContext);
+    
+    // Check for custom test cases from context file
+    const contextFile = (siteContext as any)?.contextFile;
+    let customTestCases: GeneratedTestCase[] = [];
+    if (contextFile?.customTestCases && Array.isArray(contextFile.customTestCases)) {
+      console.log(`📋 Found ${contextFile.customTestCases.length} custom test case(s) in context file`);
+      customTestCases = await this.convertCustomTestCases(
+        contextFile.customTestCases,
+        pageInfo,
+        startUrl
+      );
+    }
+    
+    // Combine AI-generated and custom test cases
+    const allTestCases = [...aiTestCases, ...customTestCases];
     
     // Validate test cases against discovered elements
-    const validatedTestCases = this.validateTestCases(testCases, pageInfo);
+    const validatedTestCases = this.validateTestCases(allTestCases, pageInfo);
     
     return validatedTestCases;
   }
@@ -78,6 +93,12 @@ export class TestCaseGenerator {
       architecture?: any;
       risks?: any[];
       fullReport?: string;
+      sitePurpose?: string;
+      contentNature?: 'static' | 'dynamic' | 'mixed';
+      contentPatterns?: string[];
+      testingGuidance?: string;
+      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+      contextFile?: any;
     }
   ): {
     sitePurpose?: string;
@@ -88,6 +109,7 @@ export class TestCaseGenerator {
     architecture?: any;
     risks?: any[];
     fullReport?: string;
+    contextFile?: any;
   } {
     const characteristics: {
       sitePurpose?: string;
@@ -95,6 +117,10 @@ export class TestCaseGenerator {
       contentPatterns?: string[];
       testingGuidance?: string;
       updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+      architecture?: any;
+      risks?: any[];
+      fullReport?: string;
+      contextFile?: any;
     } = {};
 
     // Collect from vision analyses
@@ -923,6 +949,246 @@ Return a JSON object with this EXACT structure:
     }
 
     return testCases;
+  }
+
+  /**
+   * Convert custom test cases from context file (plain English) to structured test cases
+   */
+  private async convertCustomTestCases(
+    customTestCases: Array<{
+      name: string;
+      description: string;
+      page?: string;
+      priority?: 'high' | 'medium' | 'low';
+    }>,
+    pageInfo: Array<{ 
+      url: string; 
+      title: string; 
+      actions: string[]; 
+      features: string[];
+      discoveredElements: import('./types.js').DiscoveredElements;
+    }>,
+    startUrl: string
+  ): Promise<GeneratedTestCase[]> {
+    const converted: GeneratedTestCase[] = [];
+    
+    for (let i = 0; i < customTestCases.length; i++) {
+      const custom = customTestCases[i];
+      
+      try {
+        // Use AI to convert plain English description to structured test steps
+        const structured = await this.parseCustomTestCase(custom, pageInfo, startUrl);
+        
+        if (structured && structured.steps && structured.steps.length > 0) {
+          // Assign ID that won't conflict with AI-generated ones (start from TC-100)
+          converted.push({
+            id: `TC-${String(100 + i).padStart(3, '0')}`,
+            name: custom.name,
+            description: custom.description,
+            priority: custom.priority || 'high',
+            category: 'custom',
+            steps: structured.steps,
+            expectedResult: structured.expectedResult || 'Test should complete successfully',
+            pageUrl: structured.pageUrl,
+          });
+        }
+      } catch (error) {
+        console.warn(`⚠️  Could not convert custom test case "${custom.name}": ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    
+    return converted;
+  }
+
+  /**
+   * Parse a custom test case description (plain English) into structured test steps using AI
+   */
+  private async parseCustomTestCase(
+    custom: {
+      name: string;
+      description: string;
+      page?: string;
+      priority?: 'high' | 'medium' | 'low';
+    },
+    pageInfo: Array<{ 
+      url: string; 
+      title: string; 
+      actions: string[]; 
+      features: string[];
+      discoveredElements: import('./types.js').DiscoveredElements;
+    }>,
+    startUrl: string
+  ): Promise<{
+    steps: TestStep[];
+    expectedResult: string;
+    pageUrl?: string;
+  } | null> {
+    // Build discovery summary for context
+    const discoverySummary = this.buildDiscoverySummary(pageInfo);
+    
+    // Find the target page URL
+    let targetPageUrl = startUrl;
+    if (custom.page) {
+      // Try to find matching page
+      const matchingPage = pageInfo.find(p => 
+        p.url.includes(custom.page!) || 
+        p.url.endsWith(custom.page!) ||
+        custom.page!.includes(p.url)
+      );
+      if (matchingPage) {
+        targetPageUrl = matchingPage.url;
+      } else {
+        // Try to construct URL from startUrl
+        try {
+          const baseUrl = new URL(startUrl);
+          targetPageUrl = new URL(custom.page, baseUrl.origin).href;
+        } catch {
+          // If that fails, use startUrl
+          targetPageUrl = startUrl;
+        }
+      }
+    }
+    
+    const prompt = `You are a QA test case parser. Convert a plain English test case description into structured test steps that can handle DYNAMIC and EXPLORATORY testing.
+
+CUSTOM TEST CASE TO PARSE:
+Name: ${custom.name}
+Description: ${custom.description}
+Target Page: ${custom.page || 'Not specified'}
+
+${discoverySummary}
+
+CRITICAL RULES FOR DYNAMIC/EXPLORATORY TESTING:
+1. Parse the plain English description into specific, actionable test steps
+2. Each step should have an "action" (navigate, click, verify, type, extract, count, etc.) and a clear "description"
+3. When the description mentions PATTERNS (like "any filter", "a filter", "the first filter", "a company filter"):
+   - DO NOT use exact text matches
+   - Instead, describe WHERE to find the element (e.g., "in the Top Companies Mentioned section")
+   - Describe WHAT to look for (e.g., "a clickable filter", "an element showing a count")
+   - The test executor will find elements dynamically based on context
+4. When the description mentions EXTRACTING VALUES (like "extract the count", "get the number"):
+   - Create an "extract" or "verify" step that describes extracting the value from the element text
+   - Use descriptive language like "Extract the mention count from the filter text"
+5. When the description mentions COMPARING VALUES (like "count should match", "verify the number"):
+   - Create a "verify" step that describes counting and comparing
+   - Use language like "Count the displayed articles and verify the count matches the extracted count"
+6. Always start with navigation to the target page if specified
+7. For EXPLORATORY tests (testing patterns, not specific elements):
+   - Use descriptive targets that describe location/context, not exact text
+   - Example: Instead of target: "Apple 8 mentions", use description: "Find and click the first filter in the Top Companies Mentioned section"
+   - The description should guide the test executor to find elements dynamically
+
+Return ONLY valid JSON with this structure:
+{
+  "steps": [
+    {"action": "navigate", "description": "Navigate to [page URL]"},
+    {"action": "extract", "description": "Extract [value] from [element/location]", "target": "[contextual description]"},
+    {"action": "click", "description": "Click on [element description with location context]", "target": "[contextual description or section]"},
+    {"action": "count", "description": "Count [what to count]"},
+    {"action": "verify", "description": "Verify [comparison or check]"}
+  ],
+  "expectedResult": "What should happen when this test passes",
+  "pageUrl": "${targetPageUrl}"
+}
+
+EXAMPLES:
+
+Example 1 - Specific element: "Click on 'News' button"
+  Step: {"action": "click", "description": "Click on 'News' button", "target": "News"}
+
+Example 2 - Dynamic pattern: "Click on any filter in Top Companies section"
+  Step: {"action": "click", "description": "Find and click the first filter in the Top Companies Mentioned section", "target": "Top Companies Mentioned section"}
+
+Example 3 - Extract and verify: "Extract count from filter and verify articles match"
+  Steps: [
+    {"action": "extract", "description": "Find the first filter in the Top Companies Mentioned section and extract the mention count from its text", "target": "Top Companies Mentioned section"},
+    {"action": "click", "description": "Click on the filter from which the count was extracted", "target": "Top Companies Mentioned section"},
+    {"action": "count", "description": "Count the number of articles displayed after clicking the filter"},
+    {"action": "verify", "description": "Verify that the article count matches the extracted mention count"}
+  ]
+
+For the current test case, generate steps that:
+- Find elements dynamically based on their location/context (not exact text)
+- Extract values (like counts) from element text
+- Compare extracted values with actual results
+- Use descriptive language that guides exploratory testing
+
+Return ONLY the JSON object, no markdown, no explanations.`;
+
+    try {
+      const OpenAI = (await import('openai')).default;
+      const client = new OpenAI({ apiKey: this.config.openaiApiKey });
+      
+      const response = await client.chat.completions.create({
+        model: this.config.openaiModel,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a QA test case parser. Return ONLY valid JSON with steps array, expectedResult, and pageUrl. No markdown, no explanations.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 1000,
+      });
+
+      const content = response.choices[0]?.message?.content || '{}';
+      
+      // Log reasoning
+      if (this.visionService && typeof this.visionService.logReasoning === 'function') {
+        await this.visionService.logReasoning({
+          timestamp: new Date().toISOString(),
+          operation: 'parseCustomTestCase',
+          model: this.config.openaiModel,
+          prompt: prompt.substring(0, 2000) + (prompt.length > 2000 ? '...' : ''),
+          response: content.substring(0, 2000) + (content.length > 2000 ? '...' : ''),
+          tokenUsage: response.usage ? {
+            prompt_tokens: response.usage.prompt_tokens,
+            completion_tokens: response.usage.completion_tokens,
+            total_tokens: response.usage.total_tokens,
+          } : undefined,
+          metadata: {
+            customTestCaseName: custom.name,
+          },
+        });
+      }
+      
+      // Clean and parse
+      let cleanedContent = content.trim();
+      if (cleanedContent.startsWith('```')) {
+        cleanedContent = cleanedContent.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+      }
+      
+      const parsed = JSON.parse(cleanedContent);
+      
+      // Validate and return
+      if (parsed.steps && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+        const validSteps = parsed.steps
+          .filter((s: any) => s && s.action && s.description)
+          .map((s: any) => ({
+            action: String(s.action).toLowerCase(),
+            description: String(s.description).trim(),
+            target: s.target ? String(s.target).trim() : undefined,
+            value: s.value ? String(s.value).trim() : undefined,
+          }));
+        
+        if (validSteps.length > 0) {
+          return {
+            steps: validSteps,
+            expectedResult: String(parsed.expectedResult || 'Test should complete successfully').trim(),
+            pageUrl: parsed.pageUrl ? String(parsed.pageUrl).trim() : targetPageUrl,
+          };
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.error(`Error parsing custom test case "${custom.name}":`, error);
+      return null;
+    }
   }
 
   /**

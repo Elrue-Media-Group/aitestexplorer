@@ -117,7 +117,17 @@ async function main() {
     const initialReport = await outputGenerator.generateReport(pages, url, []); // Empty test results for now
     
     // Extract site context from reports
-    const siteContext = {
+    const siteContext: {
+      architecture?: any;
+      risks?: any[];
+      fullReport?: string;
+      sitePurpose?: string;
+      contentNature?: 'static' | 'dynamic' | 'mixed';
+      contentPatterns?: string[];
+      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+      testingGuidance?: string;
+      contextFile?: any;
+    } = {
       architecture: initialReport.architecture,
       risks: initialReport.risks,
       fullReport: await readFullReport(runFolder),
@@ -134,7 +144,7 @@ async function main() {
       if (contextFile.updateFrequency) siteContext.updateFrequency = contextFile.updateFrequency;
       if (contextFile.testingGuidance) siteContext.testingGuidance = contextFile.testingGuidance;
       // Store full context file for reference
-      (siteContext as any).contextFile = contextFile;
+      siteContext.contextFile = contextFile;
     }
 
     // Generate test cases from exploration with site context

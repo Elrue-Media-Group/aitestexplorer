@@ -15,6 +15,8 @@ export class AutomationEngine {
   private visitedUrls = new Set<string>();
   private startDomain: string = '';
   private runScreenshotDir: string = '';
+  private navigationGuardActive = false;
+  private lastNavigationTime = 0;
 
   constructor(config: Config) {
     this.config = config;
@@ -75,8 +77,9 @@ export class AutomationEngine {
         return;
       }
       
-      // Always allow resource requests (images, CSS, JS, fonts, etc.)
-      const resourceTypes = ['image', 'stylesheet', 'script', 'font', 'media', 'websocket', 'manifest', 'xhr', 'fetch'];
+      // Always allow resource requests (images, CSS, JS, fonts, analytics, etc.)
+      // This includes Google Analytics, tracking scripts, and all third-party resources
+      const resourceTypes = ['image', 'stylesheet', 'script', 'font', 'media', 'websocket', 'manifest', 'xhr', 'fetch', 'other'];
       if (resourceTypes.includes(resourceType)) {
         await route.continue();
         return;
@@ -86,15 +89,20 @@ export class AutomationEngine {
       if (resourceType === 'document') {
         try {
           const requestDomain = new URL(url).hostname;
-          if (requestDomain === this.startDomain) {
+          // Normalize domains (remove www. prefix for comparison)
+          const normalizedRequestDomain = requestDomain.replace(/^www\./, '');
+          const normalizedStartDomain = this.startDomain.replace(/^www\./, '');
+          
+          if (normalizedRequestDomain === normalizedStartDomain) {
             await route.continue();
           } else {
             // Block external domain navigations
             console.log(`🚫 Blocked external navigation to: ${url}`);
             await route.abort();
           }
-        } catch {
-          // If URL parsing fails, allow it (might be a data URL or similar)
+        } catch (error) {
+          // If URL parsing fails, allow it (might be a data URL, blob, or similar)
+          // Better to allow than block and break the page
           await route.continue();
         }
       } else {
@@ -104,29 +112,61 @@ export class AutomationEngine {
     });
 
     // Also add a navigation event listener as a backup
+    // Add guard to prevent infinite retry loops
     this.page.on('framenavigated', async (frame) => {
-      if (frame === this.page!.mainFrame()) {
+      if (frame === this.page!.mainFrame() && !this.navigationGuardActive) {
         const currentUrl = frame.url();
+        const now = Date.now();
+        
+        // Prevent rapid-fire navigation attempts (rate limiting)
+        if (now - this.lastNavigationTime < 1000) {
+          return; // Ignore if navigation happened less than 1 second ago
+        }
+        
         try {
           const currentDomain = new URL(currentUrl).hostname;
-          if (currentDomain !== this.startDomain) {
+          const normalizedCurrentDomain = currentDomain.replace(/^www\./, '');
+          const normalizedStartDomain = this.startDomain.replace(/^www\./, '');
+          
+          if (normalizedCurrentDomain !== normalizedStartDomain) {
             console.log(`🚫 Detected navigation to external domain: ${currentDomain}, navigating back...`);
-            // Navigate back to the last visited same-domain URL
-            const sameDomainUrls = Array.from(this.visitedUrls).filter(url => {
-              try {
-                return new URL(url).hostname === this.startDomain;
-              } catch {
-                return false;
+            this.navigationGuardActive = true;
+            this.lastNavigationTime = now;
+            
+            try {
+              // Navigate back to the last visited same-domain URL
+              const sameDomainUrls = Array.from(this.visitedUrls).filter(url => {
+                try {
+                  const urlDomain = new URL(url).hostname.replace(/^www\./, '');
+                  return urlDomain === normalizedStartDomain;
+                } catch {
+                  return false;
+                }
+              });
+              
+              if (sameDomainUrls.length > 0) {
+                await this.page!.goto(sameDomainUrls[sameDomainUrls.length - 1], { 
+                  waitUntil: 'domcontentloaded', 
+                  timeout: 10000 
+                });
+              } else {
+                await this.page!.goto(startUrl, { 
+                  waitUntil: 'domcontentloaded', 
+                  timeout: 10000 
+                });
               }
-            });
-            if (sameDomainUrls.length > 0) {
-              await this.page!.goto(sameDomainUrls[sameDomainUrls.length - 1]);
-            } else {
-              await this.page!.goto(startUrl);
+            } catch (navError) {
+              console.error(`⚠️  Failed to navigate back: ${navError instanceof Error ? navError.message : String(navError)}`);
+              // Don't retry - break the loop
+            } finally {
+              // Reset guard after a delay to allow navigation to complete
+              setTimeout(() => {
+                this.navigationGuardActive = false;
+              }, 2000);
             }
           }
         } catch {
-          // If URL parsing fails, ignore
+          // If URL parsing fails, ignore - don't trigger navigation
         }
       }
     });
@@ -140,8 +180,44 @@ export class AutomationEngine {
       
       try {
         console.log(`\n🌐 Navigating to: ${currentUrl}`);
-        await this.page.goto(currentUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        await this.page.waitForTimeout(2000); // Wait for dynamic content
+        this.navigationGuardActive = true; // Prevent framenavigated listener from interfering
+        
+        let navigationSuccess = false;
+        // Use 'load' instead of 'networkidle' to avoid issues with analytics scripts
+        // 'load' waits for the load event, which is sufficient for most pages
+        try {
+          await this.page.goto(currentUrl, { waitUntil: 'load', timeout: 60000 });
+          navigationSuccess = true;
+        } catch (loadError) {
+          // If 'load' times out, try 'domcontentloaded' which is more lenient
+          console.log(`⚠️  Load event timeout, trying domcontentloaded...`);
+          try {
+            await this.page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            navigationSuccess = true;
+          } catch (domError) {
+            // Last resort: just wait for navigation
+            console.log(`⚠️  Using commit navigation strategy...`);
+            try {
+              await this.page.goto(currentUrl, { waitUntil: 'commit', timeout: 30000 });
+              navigationSuccess = true;
+            } catch (commitError) {
+              // If all navigation strategies fail, skip this URL
+              console.error(`❌ Failed to load ${currentUrl} after all retry strategies`);
+              console.error(`   Error: ${commitError instanceof Error ? commitError.message : String(commitError)}`);
+              this.navigationGuardActive = false;
+              continue; // Skip to next URL instead of retrying
+            }
+          }
+        }
+        
+        if (!navigationSuccess) {
+          this.navigationGuardActive = false;
+          continue; // Skip this URL
+        }
+        
+        // Give a bit more time for dynamic content and analytics to initialize
+        await this.page.waitForTimeout(3000);
+        this.navigationGuardActive = false; // Re-enable navigation guard
 
         const pageState = await this.analyzeAndInteract(currentUrl);
         pages.push(pageState);
@@ -306,11 +382,12 @@ export class AutomationEngine {
           method: (form as HTMLFormElement).method || undefined,
           fields: Array.from(form.querySelectorAll('input, textarea, select')).map((field) => {
             const input = field as HTMLInputElement;
+            const labels = (input as any).labels;
             return {
               type: input.type || field.tagName.toLowerCase(),
               name: input.name || undefined,
               placeholder: input.placeholder || undefined,
-              label: (field.labels?.[0]?.textContent?.trim()) || undefined,
+              label: (labels?.[0]?.textContent?.trim()) || undefined,
               required: input.required || false,
             };
           }),
