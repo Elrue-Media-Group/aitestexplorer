@@ -17,6 +17,7 @@ interface AIReasoningLog {
     completion_tokens: number;
     total_tokens: number;
   };
+  finishReason?: string;
   metadata?: Record<string, any>;
 }
 
@@ -35,14 +36,29 @@ export class AIVisionService {
    * Log AI reasoning (prompt, response, token usage)
    */
   async logReasoning(log: AIReasoningLog): Promise<void> {
-    if (!this.reasoningLogPath) return;
+    if (!this.reasoningLogPath) {
+      console.warn('⚠️  Reasoning log path not set, skipping log');
+      return;
+    }
 
     try {
+      // Ensure directory exists
+      const { dirname } = await import('path');
+      const logDir = dirname(this.reasoningLogPath);
+      try {
+        await fs.mkdir(logDir, { recursive: true });
+      } catch {
+        // Directory might already exist, that's fine
+      }
+
       // Read existing log or create new array
       let logs: AIReasoningLog[] = [];
       try {
         const existingContent = await fs.readFile(this.reasoningLogPath, 'utf-8');
         logs = JSON.parse(existingContent);
+        if (!Array.isArray(logs)) {
+          logs = [];
+        }
       } catch {
         // File doesn't exist yet, start with empty array
       }
@@ -52,9 +68,10 @@ export class AIVisionService {
 
       // Write back to file
       await fs.writeFile(this.reasoningLogPath, JSON.stringify(logs, null, 2), 'utf-8');
+      console.log(`✅ Logged reasoning for ${log.operation} to ${this.reasoningLogPath}`);
     } catch (error) {
       // Don't fail the operation if logging fails
-      console.warn('Failed to write reasoning log:', error);
+      console.warn(`⚠️  Failed to write reasoning log to ${this.reasoningLogPath}:`, error);
     }
   }
 
@@ -102,7 +119,7 @@ Be specific and actionable. For each interactive element, describe what it likel
             ],
           },
         ],
-        max_tokens: 2000,
+        max_completion_tokens: 2000,
       });
 
       const content = response.choices[0]?.message?.content || '';
@@ -321,7 +338,7 @@ Format as clear, structured text. Do not include test cases (those are generated
             content: prompt,
           },
         ],
-        max_tokens: 3000,
+        max_completion_tokens: 4000,
       });
 
       const content = response.choices[0]?.message?.content || '';

@@ -669,7 +669,17 @@ ${siteContextSection}
 
 ${discoverySummary}
 
-Generate 10-15 test cases based on the ACTUAL elements discovered above. Each test case MUST have:
+CRITICAL: You MUST generate MULTIPLE test cases (aim for 10-15, minimum 5) even from limited exploration.
+Even if only 1 page was explored, generate multiple test cases by:
+- Creating separate test cases for EACH navigation link found
+- Creating separate test cases for EACH button found  
+- Creating separate test cases for EACH form/input found
+- Creating test cases for page load, content visibility, headings, etc.
+- Breaking down the page into focused test areas (navigation, content, functionality, etc.)
+
+DO NOT generate just 1 test case. Generate 10-15 test cases covering all discovered elements and page aspects.
+
+Generate test cases based on the ACTUAL elements discovered above. Each test case MUST have:
 - name: Clear descriptive name
 - description: What this test verifies
 - priority: "high", "medium", or "low"
@@ -698,7 +708,9 @@ CRITICAL RULES FOR TEST STEPS:
    - Test elements in the context where they were discovered
    - Do NOT test elements on pages where they don't exist
 
-Return a JSON object with this EXACT structure:
+Return a JSON object with this EXACT structure. YOU MUST GENERATE 10-15 TEST CASES (minimum 5).
+The example below shows the structure - create multiple test cases like this for ALL discovered elements:
+
 {
   "testCases": [
     {
@@ -713,9 +725,31 @@ Return a JSON object with this EXACT structure:
       ],
       "expectedResult": "Page loads successfully, title is displayed",
       "pageUrl": "${startUrl}"
+    },
+    {
+      "name": "Navigation Link - [Link Name]",
+      "description": "Verify [link name] navigation link works",
+      "priority": "high",
+      "category": "navigation",
+      "steps": [
+        {"action": "navigate", "description": "Navigate to homepage"},
+        {"action": "click", "description": "Click on '[Link Name]' link", "target": "[Link Name]"},
+        {"action": "verify", "description": "Verify navigation occurs"}
+      ],
+      "expectedResult": "Navigation link works correctly",
+      "pageUrl": "${startUrl}"
     }
   ]
-}`;
+}
+
+REMEMBER: Generate 10-15 test cases total. Create separate test cases for:
+- Each navigation link found
+- Each button found  
+- Each form found
+- Page load verification
+- Content visibility checks
+- Heading verification
+- Any other discovered elements`;
 
     try {
       // Use OpenAI client directly for text generation
@@ -735,29 +769,45 @@ Return a JSON object with this EXACT structure:
           },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 3000,
+        max_completion_tokens: 8000,
       });
 
       const content = response.choices[0]?.message?.content || '{}';
+      const finishReason = response.choices[0]?.finish_reason;
+      
+      console.log(`🔍 AI Response length: ${content.length} chars, finish_reason: ${finishReason}`);
+      console.log(`🔍 AI Response preview: ${content.substring(0, 500)}...`);
       
       // Log reasoning if visionService has logging capability
+      console.log(`🔍 Checking visionService: ${!!this.visionService}, has logReasoning: ${typeof this.visionService?.logReasoning === 'function'}`);
       if (this.visionService && typeof this.visionService.logReasoning === 'function') {
+        console.log(`🔍 Calling logReasoning for operation: generateTestCases`);
         await this.visionService.logReasoning({
           timestamp: new Date().toISOString(),
           operation: 'generateTestCases',
           model: this.config.openaiModel,
           prompt: prompt.substring(0, 2000) + (prompt.length > 2000 ? '...' : ''),
-          response: content.substring(0, 2000) + (content.length > 2000 ? '...' : ''),
+          response: content, // Store full response, not truncated
           tokenUsage: response.usage ? {
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
             total_tokens: response.usage.total_tokens,
           } : undefined,
+          finishReason: finishReason,
           metadata: {
             pagesCount: pageInfo.length,
             startUrl,
+            discoveredElementsCount: pageInfo.reduce((sum, p) => 
+              sum + (p.discoveredElements?.links?.length || 0) + 
+              (p.discoveredElements?.buttons?.length || 0) +
+              (p.discoveredElements?.forms?.length || 0), 0
+            ),
           },
         });
+      }
+      
+      if (finishReason === 'length') {
+        console.warn('⚠️  AI response was truncated! Consider increasing max_completion_tokens.');
       }
       
       // Clean content - remove any markdown code blocks if present
@@ -768,8 +818,22 @@ Return a JSON object with this EXACT structure:
       
       const parsed = JSON.parse(cleanedContent);
       
+      console.log(`🔍 Parsed JSON keys: ${Object.keys(parsed).join(', ')}`);
+      
       // Handle both {testCases: [...]} and [...] formats
       const testCasesArray = Array.isArray(parsed) ? parsed : (parsed.testCases || []);
+      
+      console.log(`🔍 Found ${testCasesArray.length} test cases in AI response`);
+      console.log(`🔍 Test case names: ${testCasesArray.map((tc: any) => tc.name || 'unnamed').join(', ')}`);
+      
+      if (testCasesArray.length === 0) {
+        console.warn('⚠️  AI returned empty testCases array!');
+        console.warn(`⚠️  Parsed object: ${JSON.stringify(parsed, null, 2).substring(0, 500)}`);
+      }
+      
+      if (testCasesArray.length === 1) {
+        console.warn('⚠️  AI only generated 1 test case! This might indicate the prompt needs adjustment.');
+      }
       
       // Validate and filter test cases
       const validTestCases = testCasesArray
@@ -1132,7 +1196,7 @@ Return ONLY the JSON object, no markdown, no explanations.`;
           },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 1000,
+        max_completion_tokens: 2000,
       });
 
       const content = response.choices[0]?.message?.content || '{}';

@@ -21,18 +21,55 @@ An intelligent, out-of-process UI automation tool that uses AI vision to navigat
 
 For a complete setup guide, see [SETUP.md](./SETUP.md)
 
-**Quick setup:**
+### Initial Setup (One-Time)
+
 ```bash
-# Install everything (dependencies + Playwright browsers)
+# 1. Install dependencies and Playwright browsers
 npm run setup
 
-# Create .env file from template
+# 2. Create .env file from template
 cp env.template .env
 
-# Edit .env and add your OpenAI API key
-# Then run a trial:
-npm run dev -- --url https://example.com --max-pages 2 --max-actions 5
+# 3. Edit .env and add your OpenAI API key
+# OPENAI_API_KEY=sk-your-actual-api-key-here
 ```
+
+Get your API key from: https://platform.openai.com/api-keys
+
+### Running from Command Line
+
+```bash
+# Basic run
+npm run dev -- --url https://example.com
+
+# With custom limits
+npm run dev -- --url https://example.com --max-pages 2 --max-actions 5
+
+# Headless mode
+npm run dev -- --url https://example.com --headless
+```
+
+### Running the Web UI
+
+**First-time setup (install UI dependencies):**
+```bash
+cd ui
+npm install
+cd ..
+```
+
+**Start the application:**
+```bash
+# Terminal 1: Start the API server
+npm run server
+
+# Terminal 2: Start the UI (development mode)
+npm run ui:dev
+```
+
+Then open http://localhost:5173 in your browser.
+
+For production builds, see [UI_SETUP.md](./UI_SETUP.md)
 
 ## Installation
 
@@ -60,27 +97,68 @@ Get your API key from: https://platform.openai.com/api-keys
 
 ## Usage
 
-### Basic Usage
+The tool can be used in two ways:
 
-Run the tool with a target URL:
+1. **Command Line Interface (CLI)** - Original interface, fully functional
+2. **Web UI** - Browser-based interface with real-time progress tracking
+
+### Web UI (Recommended for Interactive Use)
+
+**Prerequisites:** Make sure you've completed the initial setup above and installed UI dependencies:
+
+```bash
+cd ui && npm install && cd ..
+```
+
+**Start the application:**
+
+```bash
+# Terminal 1: Start the API server (runs on http://localhost:3000)
+npm run server
+
+# Terminal 2: Start the UI development server (runs on http://localhost:5173)
+npm run ui:dev
+```
+
+Then open **http://localhost:5173** in your browser.
+
+**Features:**
+- Configure test runs with URL, max pages, max actions
+- View real-time test progress and logs
+- Browse all test results with detailed reports
+- Manage context files for enhanced test generation
+
+For production deployment, see [UI_SETUP.md](./UI_SETUP.md)
+
+### Command Line Interface (CLI)
+
+The CLI is the original interface and works independently of the web UI.
+
+#### Basic Usage
 
 ```bash
 npm run dev -- --url https://example.com
 ```
 
-### With Custom Limits
+#### With Custom Limits
 
 ```bash
 npm run dev -- --url https://example.com --max-pages 5 --max-actions 30
 ```
 
-### Headless Mode
+#### Headless Mode
 
 ```bash
 npm run dev -- --url https://example.com --headless
 ```
 
-### Command Line Options
+#### Cost Estimate Only
+
+```bash
+npm run dev -- --url https://example.com --estimate
+```
+
+#### Command Line Options
 
 - `--url` / `-u`: Target URL to analyze (required)
 - `--max-pages`: Maximum number of pages to visit (default: 10)
@@ -124,13 +202,22 @@ You can configure the tool via environment variables in `.env`:
 
 ```
 src/
-├── index.ts              # Main entry point and CLI
+├── index.ts              # CLI entry point
+├── server.ts             # Web API server (Express)
+├── test-runner.ts        # Core test execution logic (shared by CLI and API)
 ├── config.ts             # Configuration management
 ├── types.ts              # TypeScript type definitions
 ├── automation-engine.ts  # Core automation logic with Playwright
 ├── ai-vision.ts          # AI vision service integration
 └── output-generator.ts   # Report generation
+
+ui/                       # React frontend (web UI)
+├── src/
+│   ├── components/      # React components
+│   └── App.tsx          # Main UI entry point
 ```
+
+**Note:** The CLI (`index.ts`) and Web UI (`server.ts`) are completely independent. The CLI functionality is unchanged and works exactly as before.
 
 ## Cost Estimation
 

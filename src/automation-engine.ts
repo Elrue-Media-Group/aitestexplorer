@@ -57,9 +57,18 @@ export class AutomationEngine {
       throw new Error('Engine not initialized. Call initialize() first.');
     }
 
+    // Reset state for new exploration (CRITICAL: ensures clean state for each run)
+    console.log(`🔄 Resetting exploration state: actionCount=${this.actionCount} -> 0, visitedUrls=${this.visitedUrls.size} -> 0`);
+    this.actionCount = 0;
+    this.visitedUrls.clear();
+    this.pagesVisited.clear();
+    this.navigationGuardActive = false;
+    this.lastNavigationTime = 0;
+
     // Store the starting domain to filter external links
     try {
       this.startDomain = new URL(startUrl).hostname;
+      console.log(`🌐 Starting domain set to: ${this.startDomain}`);
     } catch {
       throw new Error(`Invalid start URL: ${startUrl}`);
     }
@@ -175,7 +184,9 @@ export class AutomationEngine {
     const urlsToVisit = [startUrl];
     this.visitedUrls.add(this.normalizeUrl(startUrl));
 
+    console.log(`\n🔍 Starting exploration: maxPages=${this.config.maxPages}, maxActions=${this.config.maxActions}`);
     while (urlsToVisit.length > 0 && pages.length < this.config.maxPages && this.actionCount < this.config.maxActions) {
+      console.log(`\n🔍 Loop iteration: urlsToVisit=${urlsToVisit.length}, pages=${pages.length}, actionCount=${this.actionCount}`);
       const currentUrl = urlsToVisit.shift()!;
       
       try {
@@ -219,29 +230,76 @@ export class AutomationEngine {
         await this.page.waitForTimeout(3000);
         this.navigationGuardActive = false; // Re-enable navigation guard
 
-        const pageState = await this.analyzeAndInteract(currentUrl);
-        pages.push(pageState);
+        try {
+          const pageState = await this.analyzeAndInteract(currentUrl);
+          pages.push(pageState);
+          console.log(`✅ Successfully analyzed page: ${currentUrl} (${pages.length} total pages)`);
 
-        // Extract new URLs from the page
-        const links = await this.page.$$eval('a[href]', (anchors) =>
-          anchors.map((a) => (a as HTMLAnchorElement).href).filter(Boolean)
-        );
+          // Extract new URLs from the page
+          const links = await this.page.$$eval('a[href]', (anchors) =>
+            anchors.map((a) => (a as HTMLAnchorElement).href).filter(Boolean)
+          );
 
-        for (const link of links) {
-          const normalized = this.normalizeUrl(link);
-          if (
-            !this.visitedUrls.has(normalized) &&
-            this.isSameDomain(link, startUrl) &&
-            urlsToVisit.length + pages.length < this.config.maxPages
-          ) {
-            urlsToVisit.push(link);
-            this.visitedUrls.add(normalized);
+          console.log(`🔍 Found ${links.length} total links on page`);
+          console.log(`🔍 Current state: pages.length=${pages.length}, maxPages=${this.config.maxPages}, actionCount=${this.actionCount}, maxActions=${this.config.maxActions}`);
+          console.log(`🔍 urlsToVisit.length=${urlsToVisit.length}, visitedUrls.size=${this.visitedUrls.size}`);
+
+          let linksAdded = 0;
+          for (const link of links) {
+            const normalized = this.normalizeUrl(link);
+            const isSameDomain = this.isSameDomain(link, startUrl);
+            const isVisited = this.visitedUrls.has(normalized);
+            const wouldExceedMax = urlsToVisit.length + pages.length >= this.config.maxPages;
+            
+            if (!isVisited && isSameDomain && !wouldExceedMax) {
+              urlsToVisit.push(link);
+              this.visitedUrls.add(normalized);
+              linksAdded++;
+            }
+          }
+          console.log(`🔍 Added ${linksAdded} new links to visit queue`);
+          console.log(`🔍 Queue now has ${urlsToVisit.length} URLs to visit`);
+        } catch (analyzeError) {
+            console.error(`Error analyzing page ${currentUrl}:`, analyzeError);
+            // Even if analysis fails, add a basic page state so we don't lose the page
+            pages.push({
+              url: currentUrl,
+              title: await this.page.title().catch(() => 'Unknown'),
+              timestamp: new Date(),
+              screenshot: '',
+              actions: [],
+              discoveredElements: {
+                links: [],
+                buttons: [],
+                forms: [],
+                headings: [],
+                navigationItems: []
+              }
+            });
+          }
+        } catch (error) {
+          console.error(`Error processing ${currentUrl}:`, error);
+          // Try to add a basic page state even on error
+          try {
+            pages.push({
+              url: currentUrl,
+              title: await this.page?.title().catch(() => 'Unknown') || 'Unknown',
+              timestamp: new Date(),
+              screenshot: '',
+              actions: [],
+              discoveredElements: {
+                links: [],
+                buttons: [],
+                forms: [],
+                headings: [],
+                navigationItems: []
+              }
+            });
+          } catch {
+            // If we can't even add a basic page state, skip it
           }
         }
-      } catch (error) {
-        console.error(`Error processing ${currentUrl}:`, error);
       }
-    }
 
     return pages;
   }
@@ -642,6 +700,10 @@ export class AutomationEngine {
 
   getPage(): Page | null {
     return this.page;
+  }
+
+  getBrowser(): Browser | null {
+    return this.browser;
   }
 }
 

@@ -392,13 +392,21 @@ export class OutputGenerator {
     // Format and write reasoning log if it exists
     const reasoningLogPath = this.getReasoningLogPath();
     try {
-      const reasoningContent = await fs.readFile(reasoningLogPath, 'utf-8');
-      const reasoningLogs = JSON.parse(reasoningContent);
-      const formattedReasoning = this.formatReasoningLog(reasoningLogs);
-      await writeFile(join(basePath, 'ai-reasoning.md'), formattedReasoning);
-      console.log(chalk.cyan(`📋 AI reasoning log saved to: ${join(basePath, 'ai-reasoning.md')}\n`));
-    } catch {
-      // Reasoning log doesn't exist or couldn't be read - that's okay
+      if (existsSync(reasoningLogPath)) {
+        const reasoningContent = await fs.readFile(reasoningLogPath, 'utf-8');
+        const reasoningLogs = JSON.parse(reasoningContent);
+        if (reasoningLogs && reasoningLogs.length > 0) {
+          const formattedReasoning = this.formatReasoningLog(reasoningLogs);
+          await writeFile(join(basePath, 'ai-reasoning.md'), formattedReasoning);
+          console.log(chalk.cyan(`📋 AI reasoning log saved to: ${join(basePath, 'ai-reasoning.md')}\n`));
+        } else {
+          console.log(chalk.yellow(`⚠️  Reasoning log exists but is empty: ${reasoningLogPath}\n`));
+        }
+      } else {
+        console.log(chalk.yellow(`⚠️  Reasoning log not found at: ${reasoningLogPath}\n`));
+      }
+    } catch (error) {
+      console.warn(chalk.yellow(`⚠️  Failed to read/format reasoning log: ${error instanceof Error ? error.message : String(error)}\n`));
     }
 
     console.log(`\n✅ Reports generated in ${basePath}/`);
