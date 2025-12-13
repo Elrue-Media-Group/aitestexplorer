@@ -78,6 +78,16 @@ export interface VisionAnalysis {
   risks: string[];
   architecture: ArchitectureInfo;
   siteCharacteristics?: SiteCharacteristics;
+  loginInfo?: LoginInfo;
+}
+
+export interface LoginInfo {
+  isLoginPage: boolean;
+  credentialsVisible?: boolean;
+  username?: string;
+  password?: string;
+  shouldLogin?: boolean;
+  postLoginStrategy?: string;
 }
 
 export interface SiteCharacteristics {
@@ -94,6 +104,11 @@ export interface InteractiveElement {
   location: string;
   purpose: string;
   selector?: string;
+  // Functional Understanding - AI's understanding of what the element does
+  behavior?: string;  // What it does functionally (e.g., "takes input text and displays it back")
+  workflow?: string;  // How it works in context (e.g., "User enters text → Clicks Update Name → Display panel updates")
+  relatedElements?: string[];  // What it interacts with (e.g., ["name input field", "name display panel"])
+  expectedOutcome?: string;  // What should happen when used (e.g., "Display panel updates with entered name")
 }
 
 export interface SuggestedAction {

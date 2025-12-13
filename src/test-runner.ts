@@ -131,11 +131,52 @@ export async function runTestAnalysis(
     const engine = new AutomationEngine(config);
     await engine.initialize(screenshotsDir);
 
+    // Capture console output from automation engine
+    const originalConsoleLog = console.log;
+    const originalConsoleError = console.error;
+    const originalConsoleWarn = console.warn;
+    
+    const logToFile = async (level: string, ...args: any[]) => {
+      const message = args.map(arg => 
+        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+      ).join(' ');
+      const logEntry = `[${new Date().toISOString()}] [${level}] ${message}\n`;
+      try {
+        await writeFile(logPath, logEntry, { flag: 'a' });
+      } catch {
+        // Ignore log write errors
+      }
+      // Also output to console
+      if (level === 'ERROR') {
+        originalConsoleError(...args);
+      } else if (level === 'WARN') {
+        originalConsoleWarn(...args);
+      } else {
+        originalConsoleLog(...args);
+      }
+    };
+    
+    // Override console methods to capture automation engine logs
+    console.log = (...args: any[]) => {
+      logToFile('LOG', ...args);
+    };
+    console.error = (...args: any[]) => {
+      logToFile('ERROR', ...args);
+    };
+    console.warn = (...args: any[]) => {
+      logToFile('WARN', ...args);
+    };
+
     await updateProgress('exploring', 'Exploring website...', { pagesVisited: 0 });
 
     // Explore website
     const pages = await engine.exploreWebsite(url);
     await updateProgress('exploring', `Explored ${pages.length} page(s)`, { pagesVisited: pages.length });
+    
+    // Restore original console methods
+    console.log = originalConsoleLog;
+    console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
 
     await updateProgress('analyzing', 'Analyzing pages with AI vision...', { pagesToAnalyze: pages.length });
 
@@ -179,10 +220,19 @@ export async function runTestAnalysis(
         if (contextFile.testingGuidance) siteContext.testingGuidance = contextFile.testingGuidance;
         // Store full context file for reference
         siteContext.contextFile = contextFile;
+        console.log('✅ [TestRunner] Context file loaded and stored in siteContext');
+        console.log('🔍 [TestRunner] siteContext.contextFile exists?', !!siteContext.contextFile);
+        console.log('🔍 [TestRunner] siteContext.contextFile.credentials?', !!siteContext.contextFile?.credentials);
       } catch (error) {
         console.error('[TestRunner] Failed to load context file:', error);
       }
+    } else {
+      console.log('ℹ️  [TestRunner] No context file found at:', contextPath);
     }
+
+    // Debug: Log what we're about to pass to test generator
+    console.log('🔍 [TestRunner] About to pass siteContext with keys:', Object.keys(siteContext));
+    console.log('🔍 [TestRunner] siteContext.contextFile before passing?', !!siteContext.contextFile);
 
     await updateProgress('generating_tests', 'Generating test cases with AI...');
 

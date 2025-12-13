@@ -28,6 +28,23 @@ export interface TestStep {
   description: string;
   target?: string;
   value?: string;
+  // AI Intelligence Metadata - preserves AI's understanding of the element
+  elementMetadata?: {
+    // Structural Understanding
+    elementType?: 'button' | 'link' | 'input' | 'form' | 'dropdown' | 'checkbox' | 'radio';
+    selector?: string;  // CSS selector from DOM discovery
+    context?: string;   // "Name Display Demo section", "login form", etc.
+    location?: string;  // "top navigation", "main content area"
+    pageUrl?: string;   // Which page this element belongs to
+    
+    // Functional Understanding - AI's understanding of what the element does
+    purpose?: string;   // "updates the name display", "submits login credentials"
+    behavior?: string;  // "takes input text and displays it back", "navigates to home page"
+    workflow?: string;  // "User enters text → Clicks Update Name → Display panel updates"
+    relatedElements?: string[];  // ["name input field", "name display panel"]
+    expectedStateChange?: string;  // "Display panel updates with entered name"
+    functionalDescription?: string;  // Full AI understanding from vision analysis
+  };
 }
 
 export class TestCaseGenerator {
@@ -43,12 +60,18 @@ export class TestCaseGenerator {
    * Generate test cases from exploration data
    */
   async generateTestCases(
-    pages: PageState[], 
+    pages: PageState[],
     startUrl: string,
     siteContext?: {
       architecture?: any;
       risks?: any[];
       fullReport?: string;
+      sitePurpose?: string;
+      contentNature?: 'static' | 'dynamic' | 'mixed';
+      contentPatterns?: string[];
+      testingGuidance?: string;
+      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+      contextFile?: any; // CRITICAL: Must be here to receive credentials!
     }
   ): Promise<GeneratedTestCase[]> {
     // Extract information from exploration with discovered elements
@@ -210,6 +233,7 @@ export class TestCaseGenerator {
       characteristics.architecture = siteContext.architecture;
       characteristics.risks = siteContext.risks;
       characteristics.fullReport = siteContext.fullReport;
+      characteristics.contextFile = siteContext.contextFile; // CRITICAL: Pass through context file with credentials
     }
 
     return characteristics;
@@ -268,90 +292,44 @@ export class TestCaseGenerator {
       actions: string[]; 
       features: string[];
       discoveredElements: import('./types.js').DiscoveredElements;
+      visionAnalysis?: import('./types.js').VisionAnalysis;
     }>
   ): string {
-    let summary = 'ACTUAL DISCOVERY FROM EXPLORATION:\n\n';
-    summary += 'CRITICAL: Each element was found on a SPECIFIC page. Test elements ONLY on the page where they were discovered.\n\n';
+    // Condensed format - AI already saw the screenshots via vision analysis
+    let summary = '\nDISCOVERED PAGES & ELEMENTS:\n\n';
     
     for (let i = 0; i < pageInfo.length; i++) {
       const p = pageInfo[i];
-      summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-      summary += `Page ${i + 1}: ${p.title}\n`;
-      summary += `  URL: ${p.url}\n`;
-      summary += `  Page Type: ${this.inferPageType(p.url, p.title)}\n`;
-      
       const elements = p.discoveredElements;
-      
-      // Links
+
+      summary += `Page ${i + 1}: ${p.url}\n`;
+
+      // Just list what interactive elements exist - AI already saw them via vision
+      const parts = [];
       if (elements.links.length > 0) {
         const linkTexts = elements.links.map(l => `"${l.text}"`).join(', ');
-        summary += `  Links Found (${elements.links.length}): [${linkTexts}]\n`;
-      } else {
-        summary += `  Links Found: NONE\n`;
+        parts.push(`${elements.links.length} links (${linkTexts})`);
       }
-      
-      // Navigation items
-      if (elements.navigationItems.length > 0) {
-        const navTexts = elements.navigationItems.map(n => `"${n}"`).join(', ');
-        summary += `  Navigation Items: [${navTexts}]\n`;
-      }
-      
-      // Buttons
       if (elements.buttons.length > 0) {
-        const buttonTexts = elements.buttons.map(b => `"${b.text}"`).join(', ');
-        summary += `  Buttons Found (${elements.buttons.length}): [${buttonTexts}]\n`;
-      } else {
-        summary += `  Buttons Found: NONE\n`;
+        const btnTexts = elements.buttons.map(b => `"${b.text}"`).join(', ');
+        parts.push(`${elements.buttons.length} buttons (${btnTexts})`);
       }
-      
-      // Forms
       if (elements.forms.length > 0) {
-        summary += `  Forms Found (${elements.forms.length}):\n`;
-        elements.forms.forEach((form, idx) => {
-          const fieldTypes = form.fields.map(f => f.type).join(', ');
-          summary += `    Form ${idx + 1}: Fields [${fieldTypes}]\n`;
-        });
+        const formDescs = elements.forms.map((f, idx) =>
+          `form-${idx+1}: ${f.fields.map(field => field.type).join(', ')}`
+        ).join('; ');
+        parts.push(`${elements.forms.length} forms (${formDescs})`);
+      }
+
+      if (parts.length > 0) {
+        summary += `  ${parts.join('; ')}\n`;
       } else {
-        summary += `  Forms Found: NONE\n`;
+        summary += `  No interactive elements found\n`;
       }
-      
-      // Headings
-      if (elements.headings.length > 0) {
-        const headingTexts = elements.headings.slice(0, 5).map(h => `"${h.text}"`).join(', ');
-        summary += `  Main Headings: [${headingTexts}${elements.headings.length > 5 ? '...' : ''}]\n`;
-      }
-      
+
       summary += '\n';
     }
-    
-    summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    summary += `CRITICAL TESTING RULES:\n\n`;
-    summary += `1. ELEMENT-PAGE ASSOCIATION:\n`;
-    summary += `   - Each element (link, button, form) was found on a SPECIFIC page\n`;
-    summary += `   - Test elements ONLY on the page where they were discovered\n`;
-    summary += `   - If testing an element from Page 1, you MUST navigate to Page 1 first\n`;
-    summary += `   - If testing an element from Page 2, you MUST navigate to Page 2 first\n`;
-    summary += `   - Do NOT test elements on pages where they don't exist\n\n`;
-    
-    summary += `2. TEST CASE STRUCTURE:\n`;
-    summary += `   - If element is on Page 1, start with: "Navigate to Page 1 URL"\n`;
-    summary += `   - If element is on Page 2, start with: "Navigate to Page 2 URL"\n`;
-    summary += `   - Then perform the action on that specific page\n`;
-    summary += `   - Example: To test "News" button from Page 1, steps should be:\n`;
-    summary += `     Step 1: Navigate to Page 1 URL\n`;
-    summary += `     Step 2: Click on "News" button\n\n`;
-    
-    summary += `3. ELEMENT DISCOVERY:\n`;
-    summary += `   - The site does NOT have pages/elements unless they appear in the discovery above\n`;
-    summary += `   - Only test links/buttons that were ACTUALLY FOUND\n`;
-    summary += `   - Use exact text from discovery list (e.g., if link says "Interview Tips", use "Interview Tips")\n`;
-    summary += `   - Do NOT assume standard pages like "About Us" or "Contact" exist unless found\n\n`;
-    
-    summary += `4. EXPLORATORY TESTING APPROACH:\n`;
-    summary += `   - Act like an exploratory tester: test what you SEE, not what you EXPECT\n`;
-    summary += `   - Test elements in the context where they were discovered\n`;
-    summary += `   - If a button is on the homepage, test it on the homepage, not on other pages\n\n`;
-    
+
     return summary;
   }
 
@@ -386,6 +364,13 @@ export class TestCaseGenerator {
       }
       if (contextFile.primaryPurpose) {
         context += `Primary Purpose: ${contextFile.primaryPurpose}\n`;
+      }
+      // CRITICAL: Add credentials if available
+      if (contextFile.credentials) {
+        context += `\n🔐 LOGIN CREDENTIALS (USE THESE FOR LOGIN STEPS):\n`;
+        context += `  Username: ${contextFile.credentials.username || 'NOT PROVIDED'}\n`;
+        context += `  Password: ${contextFile.credentials.password || 'NOT PROVIDED'}\n`;
+        context += `  ⚠️  IMPORTANT: Use these EXACT credentials in all login steps. Do NOT make up credentials.\n`;
       }
       if (contextFile.technology) {
         context += `Technology: ${JSON.stringify(contextFile.technology)}\n`;
@@ -664,110 +649,71 @@ export class TestCaseGenerator {
       contentPatterns?: string[];
       testingGuidance?: string;
       updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+      architecture?: any;
+      risks?: any[];
+      fullReport?: string;
+      contextFile?: any; // CRITICAL: Context file with credentials
     }
   ): Promise<GeneratedTestCase[]> {
+    // Debug: Log what siteContext contains
+    console.log('🔍 [TestCaseGenerator] siteContext keys:', Object.keys(siteContext || {}));
+    console.log('🔍 [TestCaseGenerator] Has contextFile?', !!siteContext?.contextFile);
+    if (siteContext?.contextFile?.credentials) {
+      console.log('🔍 [TestCaseGenerator] Credentials found in contextFile:', {
+        username: siteContext.contextFile.credentials.username,
+        hasPassword: !!siteContext.contextFile.credentials.password
+      });
+    }
+
     // Build discovery summary
     const discoverySummary = this.buildDiscoverySummary(pageInfo);
-    
+
     // Build site context section
     const siteContextSection = this.buildSiteContextSection(siteContext);
+
+    // Debug: Log if credentials made it to the context section
+    if (siteContextSection.includes('LOGIN CREDENTIALS')) {
+      console.log('✅ [TestCaseGenerator] Credentials section IS in prompt');
+    } else {
+      console.log('❌ [TestCaseGenerator] Credentials section NOT in prompt');
+      console.log('🔍 [TestCaseGenerator] Context section preview:', siteContextSection.substring(0, 500));
+    }
     
-    const prompt = `You are a QA test case generator doing EXPLORATORY TESTING.
+    const prompt = `You are an expert exploratory tester with AI vision capabilities. You've analyzed screenshots of this website and understand its structure, purpose, and interactive elements.
 
-CRITICAL RULES:
-1. Test ONLY what was ACTUALLY DISCOVERED during exploration
-2. Do NOT assume standard pages exist (About, Contact, etc.) unless they were found
-3. Use the EXACT link text/button text from the discovery list below
-4. If a navigation link was found, test it. If not, don't test it.
-5. Act like an exploratory tester - test what you SEE, not what you EXPECT
+YOUR GOAL: Generate comprehensive test cases that thoroughly test all discovered functionality.
 
-CRITICAL: Return ONLY valid JSON. No markdown, no examples, no explanations. Just the JSON object.
+GUIDELINES:
+• Test only what you actually discovered (don't assume standard pages exist)
+• Use exact element text/labels from the discovery data
+• Create self-contained tests - if a page requires login, include login steps at the beginning
+• Use credentials you observed on the pages or from the context below
+• Focus on complete user workflows, not just isolated clicks
+• For targets: prefix with element type since you saw them via vision (e.g., "button:Sign In", "link:Home", "input:username")
 
 ${siteContextSection}
 
 ${discoverySummary}
 
-CRITICAL: You MUST generate MULTIPLE test cases (aim for 10-15, minimum 5) even from limited exploration.
-Even if only 1 page was explored, generate multiple test cases by:
-- Creating separate test cases for EACH navigation link found
-- Creating separate test cases for EACH button found  
-- Creating separate test cases for EACH form/input found
-- Creating test cases for page load, content visibility, headings, etc.
-- Breaking down the page into focused test areas (navigation, content, functionality, etc.)
-
-DO NOT generate just 1 test case. Generate 10-15 test cases covering all discovered elements and page aspects.
-
-Generate test cases based on the ACTUAL elements discovered above. Each test case MUST have:
-- name: Clear descriptive name
-- description: What this test verifies
-- priority: "high", "medium", or "low"
-- category: One word category (navigation, forms, functionality, content, etc.)
-- steps: Array of step objects, each with "action" and "description" (and optionally "target" or "value")
-- expectedResult: What should happen when test passes
-- pageUrl: The URL of the page where the element was discovered (REQUIRED)
-
-CRITICAL RULES FOR TEST STEPS:
-1. ELEMENT-PAGE ASSOCIATION: Each element belongs to a specific page
-   - If testing an element from Page 1, FIRST step must be: "Navigate to [Page 1 URL]"
-   - If testing an element from Page 2, FIRST step must be: "Navigate to [Page 2 URL]"
-   - Then perform the action on that page
-   - Example: To test "News" button found on Page 1:
-     Step 1: {"action": "navigate", "description": "Navigate to [Page 1 URL]"}
-     Step 2: {"action": "click", "description": "Click on 'News' button", "target": "News"}
-
-2. ELEMENT REFERENCE:
-   - ONLY reference elements that were ACTUALLY FOUND in the discovery above
-   - Use exact text from discovery (e.g., if link says "Interview Tips", use "Interview Tips" not "About Us")
-   - Do NOT create test cases for pages/elements that don't exist
-   - Test what IS there, not what SHOULD be there
-
-3. PAGE CONTEXT:
-   - Always include navigation to the correct page as the first step
-   - Test elements in the context where they were discovered
-   - Do NOT test elements on pages where they don't exist
-
-Return a JSON object with this EXACT structure. YOU MUST GENERATE 10-15 TEST CASES (minimum 5).
-The example below shows the structure - create multiple test cases like this for ALL discovered elements:
-
+Return valid JSON only (no markdown, no explanations):
 {
-  "testCases": [
-    {
-      "name": "Homepage Loads Correctly",
-      "description": "Verify the homepage loads and displays correctly",
-      "priority": "high",
-      "category": "page-loading",
-      "steps": [
-        {"action": "navigate", "description": "Navigate to homepage"},
-        {"action": "verify", "description": "Verify page loads within 3 seconds"},
-        {"action": "verify", "description": "Verify page title is present"}
-      ],
-      "expectedResult": "Page loads successfully, title is displayed",
-      "pageUrl": "${startUrl}"
-    },
-    {
-      "name": "Navigation Link - [Link Name]",
-      "description": "Verify [link name] navigation link works",
-      "priority": "high",
-      "category": "navigation",
-      "steps": [
-        {"action": "navigate", "description": "Navigate to homepage"},
-        {"action": "click", "description": "Click on '[Link Name]' link", "target": "[Link Name]"},
-        {"action": "verify", "description": "Verify navigation occurs"}
-      ],
-      "expectedResult": "Navigation link works correctly",
-      "pageUrl": "${startUrl}"
-    }
-  ]
+  "testCases": [{
+    "name": "descriptive test name",
+    "description": "what this verifies",
+    "priority": "high|medium|low",
+    "category": "navigation|forms|functionality|content|etc",
+    "steps": [
+      {"action": "navigate", "description": "navigate to page", "target": "http://example.com/page"},
+      {"action": "type", "description": "enter text", "target": "input:Username", "value": "text to type"},
+      {"action": "click", "description": "click element", "target": "button:Submit"},
+      {"action": "verify", "description": "verify state", "target": "element text to verify"}
+    ],
+    "expectedResult": "success criteria",
+    "pageUrl": "URL where primary element was found"
+  }]
 }
 
-REMEMBER: Generate 10-15 test cases total. Create separate test cases for:
-- Each navigation link found
-- Each button found  
-- Each form found
-- Page load verification
-- Content visibility checks
-- Heading verification
-- Any other discovered elements`;
+Generate comprehensive coverage - create test cases for all discovered interactive elements across all pages.`;
 
     try {
       // Use OpenAI client directly for text generation
@@ -787,7 +733,7 @@ REMEMBER: Generate 10-15 test cases total. Create separate test cases for:
           },
         ],
         response_format: { type: 'json_object' },
-        max_completion_tokens: 8000,
+        max_completion_tokens: 16000,
       });
 
       const content = response.choices[0]?.message?.content || '{}';

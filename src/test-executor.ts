@@ -170,6 +170,23 @@ export class TestExecutor {
       
       console.log(`\n📋 [Step ${stepNumber}] Action: "${step.action}" | Description: "${step.description}"`);
 
+      // Parse target for element type hint (e.g., "button:Sign In" -> type:"button", text:"Sign In")
+      // Do this early so it's available for all action types
+      let target: string | undefined = step.target;
+      let elementTypeHint: string | undefined;
+      if (target && target.includes(':')) {
+        const colonIndex = target.indexOf(':');
+        const possibleType = target.substring(0, colonIndex).toLowerCase();
+        const possibleText = target.substring(colonIndex + 1);
+
+        // Only parse as type hint if it's a valid element type
+        if (['button', 'link', 'input', 'textarea', 'select'].includes(possibleType)) {
+          elementTypeHint = possibleType;
+          target = possibleText;
+          console.log(`   🎯 AI provided element type hint: ${elementTypeHint} for "${target}"`);
+        }
+      }
+
       // Navigate action
       if (action === 'navigate' || description.includes('navigate')) {
         const url = step.target || testCase.pageUrl || this.page.url();
@@ -213,16 +230,15 @@ export class TestExecutor {
       if (isClickAction) {
         console.log(`\n🖱️  [Step ${stepNumber}] CLICK ACTION`);
         console.log(`   Description: ${step.description}`);
-        
+
         // Check if we need to click the element that was extracted from in a previous step
-        let target: string | undefined = step.target;
         let useExtractedElement = false;
-        
+
         if (!target || target === 'Top Companies Mentioned section' || description.includes('from which the count was extracted')) {
           // Look for previous extract step to find the element that was used
           const testCaseSteps = testCase.steps;
           const currentStepIndex = stepNumber - 1;
-          
+
           for (let i = currentStepIndex - 1; i >= 0; i--) {
             const prevStep = testCaseSteps[i];
             if ((prevStep as any).extractedElementText) {
@@ -233,13 +249,13 @@ export class TestExecutor {
             }
           }
         }
-        
+
         if (!target) {
           target = this.findClickableElement(description) || undefined;
         }
-        
+
         console.log(`   Target: ${target || 'none'}`);
-        
+
         if (target) {
           // Store URL before click for navigation tracking
           const urlBeforeClick = this.page.url();
@@ -287,7 +303,7 @@ export class TestExecutor {
           // Fallback to standard selectors if contextual finding didn't work
           if (!clicked) {
             console.log(`   🔍 Trying standard selectors...`);
-            const selectors = this.generateSelectors(target);
+            const selectors = this.generateSelectors(target, elementTypeHint);
             for (const selector of selectors) {
               try {
                 const element = await this.page.$(selector);
@@ -486,22 +502,114 @@ export class TestExecutor {
 
       // Type action
       if (action === 'type' || description.includes('type') || description.includes('enter')) {
-        const inputs = await this.page.$$('input[type="text"], input[type="email"], textarea');
-        if (inputs.length > 0) {
-          const input = inputs[0];
-          const value = step.value || this.generateTestValue(step.description);
-          
+        let input = null;
+        const value = step.value || this.generateTestValue(step.description);
+
+        // Try to find the specific input field using element type hint and target
+        if (elementTypeHint && target) {
+          console.log(`   🎯 Using element type hint to find input: ${elementTypeHint}:${target}`);
+
+          // Build selectors based on element type hint
+          const selectors: string[] = [];
+
+          if (elementTypeHint === 'input') {
+            // For inputs, try to match by placeholder, name, aria-label, or type
+            if (target.toLowerCase() === 'text') {
+              selectors.push('input[type="text"]');
+            } else if (target.toLowerCase() === 'password') {
+              selectors.push('input[type="password"]');
+            } else if (target.toLowerCase() === 'email') {
+              selectors.push('input[type="email"]');
+            } else {
+              // Try matching by placeholder, name, or aria-label
+              selectors.push(`input[placeholder*="${target}" i]`);
+              selectors.push(`input[name*="${target}" i]`);
+              selectors.push(`input[aria-label*="${target}" i]`);
+            }
+          } else if (elementTypeHint === 'textarea') {
+            selectors.push(`textarea[placeholder*="${target}" i]`);
+            selectors.push(`textarea[name*="${target}" i]`);
+          }
+
+          // Try each selector
+          for (const selector of selectors) {
+            try {
+              const element = await this.page.$(selector);
+              if (element && await element.isVisible()) {
+                input = element;
+                console.log(`   ✅ Found input via selector: ${selector}`);
+                break;
+              }
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        // Fallback: If no element type hint or couldn't find specific input, use smart inference
+        if (!input) {
+          console.log(`   🔍 Falling back to input field inference...`);
+
+          // Get all visible input fields
+          const allInputs = await this.page.$$('input[type="text"], input[type="password"], input[type="email"], textarea');
+          const visibleInputs = [];
+
+          for (const inp of allInputs) {
+            if (await inp.isVisible()) {
+              visibleInputs.push(inp);
+            }
+          }
+
+          if (visibleInputs.length > 0) {
+            // Try to infer which input based on description
+            const descLower = description.toLowerCase();
+
+            if (descLower.includes('password')) {
+              // Find password field
+              const passwordInput = await this.page.$('input[type="password"]');
+              if (passwordInput && await passwordInput.isVisible()) {
+                input = passwordInput;
+                console.log(`   ✅ Inferred password field from description`);
+              }
+            } else if (descLower.includes('email')) {
+              // Find email field
+              const emailInput = await this.page.$('input[type="email"]');
+              if (emailInput && await emailInput.isVisible()) {
+                input = emailInput;
+                console.log(`   ✅ Inferred email field from description`);
+              }
+            } else if (descLower.includes('username') || descLower.includes('user')) {
+              // Find username field (usually first text input)
+              const textInputs = await this.page.$$('input[type="text"]');
+              for (const txtInput of textInputs) {
+                if (await txtInput.isVisible()) {
+                  input = txtInput;
+                  console.log(`   ✅ Inferred username field from description`);
+                  break;
+                }
+              }
+            }
+
+            // If still no match, use first visible input
+            if (!input) {
+              input = visibleInputs[0];
+              console.log(`   ⚠️  Using first visible input field as fallback`);
+            }
+          }
+        }
+
+        if (input) {
           // Get input details
           const fieldType = await input.evaluate(el => (el as HTMLInputElement).type || 'text');
           const fieldName = await input.getAttribute('name') || undefined;
           const placeholder = await input.getAttribute('placeholder') || undefined;
           const isVisible = await input.isVisible();
           const isEnabled = await input.isEnabled();
-          
+
           await input.fill(value);
           await this.page.waitForTimeout(500);
           const inputValue = await input.inputValue();
-          
+
           const formInfo: FormInfo = {
             fieldType,
             fieldName,
@@ -511,7 +619,7 @@ export class TestExecutor {
             visible: isVisible,
             enabled: isEnabled,
           };
-          
+
           return {
             stepNumber,
             description: step.description,
@@ -1151,10 +1259,33 @@ export class TestExecutor {
   /**
    * Generate CSS selectors from target text
    */
-  private generateSelectors(target: string): string[] {
+  private generateSelectors(target: string, elementTypeHint?: string): string[] {
     const selectors: string[] = [];
 
-    // Try various selector strategies
+    // If AI provided element type hint, prioritize selectors matching that type
+    if (elementTypeHint) {
+      if (elementTypeHint === 'button') {
+        selectors.push(`button:has-text("${target}")`);
+        selectors.push(`[role="button"]:has-text("${target}")`);
+        selectors.push(`input[type="button"]:has-text("${target}")`);
+        selectors.push(`input[type="submit"]:has-text("${target}")`);
+      } else if (elementTypeHint === 'link') {
+        selectors.push(`a:has-text("${target}")`);
+        selectors.push(`[role="link"]:has-text("${target}")`);
+      } else if (elementTypeHint === 'input') {
+        selectors.push(`input[placeholder*="${target}"]`);
+        selectors.push(`input[name*="${target}"]`);
+        selectors.push(`input[aria-label*="${target}"]`);
+      } else if (elementTypeHint === 'textarea') {
+        selectors.push(`textarea[placeholder*="${target}"]`);
+        selectors.push(`textarea[name*="${target}"]`);
+      } else if (elementTypeHint === 'select') {
+        selectors.push(`select[name*="${target}"]`);
+        selectors.push(`select[aria-label*="${target}"]`);
+      }
+    }
+
+    // Try various selector strategies (fallback if type hint doesn't match)
     selectors.push(`text=${target}`);
     selectors.push(`[aria-label*="${target}"]`);
     selectors.push(`button:has-text("${target}")`);

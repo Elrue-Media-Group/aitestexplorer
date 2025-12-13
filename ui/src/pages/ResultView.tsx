@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
+import CollapsibleTestResults from '../components/CollapsibleTestResults';
 
 interface TestResult {
   runId: string;
@@ -100,8 +101,8 @@ const ResultView: React.FC = () => {
             background: '#fff',
             borderRadius: '8px',
             maxWidth: '100%'
-          }} className="markdown-content">
-            <ReactMarkdown>{resultData.results['test-results.md']}</ReactMarkdown>
+          }}>
+            <CollapsibleTestResults markdown={resultData.results['test-results.md']} />
           </div>
         ) : (
           <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>

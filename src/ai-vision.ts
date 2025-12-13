@@ -95,12 +95,38 @@ export class AIVisionService {
       ? `Previous actions taken: ${previousActions.join(', ')}. `
       : '';
 
-    const prompt = `${contextPrompt}Analyze this webpage screenshot and provide:
+    const prompt = `${contextPrompt}You are an expert exploratory tester. Your goal is to understand the ENTIRE application, not just individual pages. Think like a tester who needs to map out the full user journey and discover all functionality.
+
+Analyze this webpage screenshot and provide:
 
 1. A detailed description of what you see on the page
-2. All interactive elements (buttons, links, forms, inputs, etc.) with their likely purpose
-3. Suggested next actions to explore and test the website (prioritize by importance)
-4. The type of page (homepage, login, product listing, form, etc.)
+2. All interactive elements (buttons, links, forms, inputs, etc.) with their FUNCTIONAL UNDERSTANDING:
+   For EACH interactive element, provide:
+   - Element type (button, link, input, form, etc.)
+   - Text/label visible on the element
+   - Location/context (e.g., "Name Display Demo section", "login form", "top navigation")
+   - Purpose (what it's meant to do, e.g., "updates the name display", "submits login credentials")
+   - Behavior (how it works functionally, e.g., "takes input text and displays it back", "navigates to home page")
+   - Workflow (how it fits into user flow, e.g., "User enters text → Clicks Update Name → Display panel updates")
+   - Related elements (what it interacts with, e.g., ["name input field", "name display panel"])
+   - Expected outcome (what should happen when used, e.g., "Display panel updates with entered name")
+   
+   Format each element as:
+   ELEMENT: [Type] "[Text/Label]"
+   Location: [context/section]
+   Purpose: [what it does]
+   Behavior: [how it works]
+   Workflow: [user flow]
+   Related: [related elements]
+   Expected: [expected outcome]
+3. EXPLORATORY TESTING MINDSET - Suggested next actions (CRITICAL):
+   - Think about what comes NEXT in the user journey, not just what's on this page
+   - If this is a login page, the REAL value is exploring what's BEHIND the login - what pages, features, and workflows exist after authentication
+   - Prioritize actions that unlock more of the application (e.g., "Complete login to explore authenticated area" should be HIGHEST priority)
+   - After login, suggest exploring ALL links, buttons, and navigation elements you see
+   - Think about the full workflow: "What would a user do next? What features are available? What should I test?"
+   - If you see demo/test credentials, understand this is likely a demo site - explore it thoroughly to understand all available controls and features
+4. The type of page (homepage, login, product listing, form, dashboard, etc.)
 5. Any potential risks or issues you notice
 6. Architectural information about the site structure, navigation patterns, forms, and technology indicators
 7. Site characteristics analysis:
@@ -108,8 +134,29 @@ export class AIVisionService {
    - What is the nature of the content? (static/rarely changes, dynamic/frequently updates, mixed)
    - What patterns do you observe? (feed-based content, product listings, time-sensitive elements, rotating content, etc.)
    - Are there indicators of update frequency? (timestamps, "new" badges, real-time updates, etc.)
+8. LOGIN PAGE DETECTION (CRITICAL - EXPLORATORY FOCUS):
+   - Is this a login page? Look for password fields, username/email inputs, "Sign In" buttons, login forms
+   - If it's a login page, are there any credentials visible on the page? (e.g., "Demo Credentials: Username: test, Password: password")
+   - CREDENTIAL EXTRACTION FORMAT (IMPORTANT): If credentials are visible, provide them in this exact format on a separate line:
+     LOGIN_CREDENTIALS: Username: test Password: password
+     - Extract the ACTUAL values only (no quotes, no extra text)
+     - If page shows "Username: test", extract just: Username: test
+     - If page shows "Username: 'test'", extract just: Username: test (remove quotes)
+     - The values should be ready to use directly in a login form
+   - EXPLORATORY TESTING PERSPECTIVE: After login, what should be explored?
+     * The REAL value is discovering what pages, features, and workflows exist AFTER login
+     * Suggest exploring ALL navigation links, buttons, and interactive elements on the post-login page
+     * Think about what a user would do: "What features are available? What should I test?"
+     * If this appears to be a demo/test site, explore it thoroughly to understand all available controls
+   - If this is a login page, suggest "Complete login form" as HIGHEST priority action, followed by "Explore all links and buttons on post-login page"
 
-Be specific and actionable. For each interactive element, describe what it likely does.`;
+9. POST-LOGIN EXPLORATION STRATEGY (if this is a post-login page):
+   - What pages/features are accessible from here? List ALL navigation links, buttons, and interactive elements
+   - What workflows can be tested? (e.g., "Create item", "Filter list", "View details", etc.)
+   - What should be explored next? Prioritize actions that reveal more of the application
+   - Think about the full user journey: "What would a real user do? What features should I test?"
+
+Be specific and actionable. Think like an exploratory tester mapping out the entire application. If this is a login page, understand that login is a GATEWAY to more content - the real testing happens after authentication. Suggest actions that unlock and explore the full application, not just test the login page itself.`;
 
     try {
       const response = await this.client.chat.completions.create({
@@ -168,6 +215,9 @@ Be specific and actionable. For each interactive element, describe what it likel
     // In production, you might want to use structured output or better parsing
     const lines = content.split('\n');
     
+    // Log the raw AI response for debugging
+    console.log(`📄 AI Response (first 500 chars): ${content.substring(0, 500)}...`);
+    
     const interactiveElements: InteractiveElement[] = [];
     const suggestedActions: SuggestedAction[] = [];
     const risks: string[] = [];
@@ -182,6 +232,39 @@ Be specific and actionable. For each interactive element, describe what it likel
     };
     
     const siteCharacteristics: import('./types.js').SiteCharacteristics = {};
+    const loginInfo: import('./types.js').LoginInfo = {
+      isLoginPage: false,
+      credentialsVisible: false,
+      shouldLogin: false,
+    };
+    
+    // FIRST: Check full content for login page indicators (before line-by-line parsing)
+    // This catches cases where AI says "This is a simple login page" anywhere in the response
+    const fullContentLower = content.toLowerCase();
+    const loginPageIndicators = [
+      'login page',
+      'sign in page',
+      'login form',
+      'sign in form',
+      'authentication page',
+      'login required',
+      'simple login',
+      'login page for'
+    ];
+    
+    for (const indicator of loginPageIndicators) {
+      if (fullContentLower.includes(indicator)) {
+        loginInfo.isLoginPage = true;
+        console.log(`✅ Detected login page from AI response (indicator: "${indicator}")`);
+        break;
+      }
+    }
+    
+    // Also check for password field mentions (strong indicator of login page)
+    if (fullContentLower.includes('password field') || fullContentLower.includes('password input')) {
+      loginInfo.isLoginPage = true;
+      console.log(`✅ Detected login page from password field mention`);
+    }
 
     let currentSection = '';
     for (const line of lines) {
@@ -190,8 +273,13 @@ Be specific and actionable. For each interactive element, describe what it likel
       if (lowerLine.includes('description') || lowerLine.includes('page shows')) {
         currentSection = 'description';
         description += line + ' ';
-      } else if (lowerLine.includes('interactive') || lowerLine.includes('element')) {
+      } else if (lowerLine.includes('interactive') || lowerLine.includes('element') || lowerLine.startsWith('element:')) {
         currentSection = 'elements';
+        // Also try to extract element immediately if it's in ELEMENT: format
+        if (lowerLine.startsWith('element:')) {
+          const element = this.extractElement(line, lines, lines.indexOf(line));
+          if (element) interactiveElements.push(element);
+        }
       } else if (lowerLine.includes('suggest') || lowerLine.includes('action')) {
         currentSection = 'actions';
       } else if (lowerLine.includes('type') || lowerLine.includes('page type')) {
@@ -240,10 +328,52 @@ Be specific and actionable. For each interactive element, describe what it likel
         }
       } else if (lowerLine.includes('architecture') || lowerLine.includes('structure')) {
         currentSection = 'architecture';
+      } else if (lowerLine.includes('login page') || lowerLine.includes('is this a login') || (lowerLine.includes('login') && lowerLine.includes('page'))) {
+        currentSection = 'login';
+        // Check if it's a login page
+        if (lowerLine.includes('yes') || lowerLine.includes('is a login') || lowerLine.includes('login page')) {
+          loginInfo.isLoginPage = true;
+        }
+      } else if (lowerLine.includes('login_credentials') || (lowerLine.includes('credential') && (lowerLine.includes('username') || lowerLine.includes('password')))) {
+        currentSection = 'login';
+        loginInfo.credentialsVisible = true;
+        
+        // Look for the structured format: "LOGIN_CREDENTIALS: Username: test Password: password"
+        if (lowerLine.includes('login_credentials')) {
+          // Extract from structured format
+          const usernameMatch = line.match(/username[:\s]+([^\s\n]+)/i);
+          const passwordMatch = line.match(/password[:\s]+([^\s\n]+)/i);
+          
+          if (usernameMatch && usernameMatch[1]) {
+            loginInfo.username = usernameMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+          if (passwordMatch && passwordMatch[1]) {
+            loginInfo.password = passwordMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+        } else {
+          // Fallback: try to extract from less structured format
+          const usernameMatch = line.match(/(?:username|user\s*name|login)[\s:]+["']?([^"'\s,\n:]+)["']?/i);
+          if (usernameMatch && usernameMatch[1] && usernameMatch[1].length > 1 && usernameMatch[1].length < 100) {
+            loginInfo.username = usernameMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+          const passwordMatch = line.match(/(?:password|pass)[\s:]+["']?([^"'\s,\n:]+)["']?/i);
+          if (passwordMatch && passwordMatch[1] && passwordMatch[1].length > 1 && passwordMatch[1].length < 100) {
+            loginInfo.password = passwordMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+        }
+      } else if (lowerLine.includes('complete login') || lowerLine.includes('should login') || lowerLine.includes('after login')) {
+        currentSection = 'login';
+        if (lowerLine.includes('yes') || lowerLine.includes('should') || lowerLine.includes('high priority')) {
+          loginInfo.shouldLogin = true;
+        }
+        // Extract post-login strategy
+        if (lowerLine.includes('continue') || lowerLine.includes('explore') || lowerLine.includes('authenticated')) {
+          loginInfo.postLoginStrategy = 'continue exploration';
+        }
       } else {
         // Try to extract structured data
-        if (currentSection === 'elements' && line.trim()) {
-          const element = this.extractElement(line);
+        if (currentSection === 'elements' && line.trim() && !line.toLowerCase().startsWith('element:')) {
+          const element = this.extractElement(line, lines, lines.indexOf(line));
           if (element) interactiveElements.push(element);
         } else if (currentSection === 'actions' && line.trim()) {
           const action = this.extractAction(line);
@@ -256,6 +386,169 @@ Be specific and actionable. For each interactive element, describe what it likel
     if (!description) {
       description = content.substring(0, 500);
     }
+    
+    // If no elements were parsed but content mentions buttons/links, try a more aggressive parse
+    if (interactiveElements.length === 0) {
+      console.log(`⚠️  No elements parsed from AI vision response, attempting fallback parsing...`);
+      // Look for any mention of buttons, links, etc. in the content
+      const buttonMatches = content.match(/(?:button|link|input|form)[\s:]+["']?([^"'\n]+)["']?/gi);
+      if (buttonMatches && buttonMatches.length > 0) {
+        console.log(`   Found ${buttonMatches.length} potential elements in content`);
+        // Extract basic elements from matches
+        for (const match of buttonMatches.slice(0, 20)) { // Limit to 20
+          const element = this.extractElement(match, lines, 0);
+          if (element) {
+            interactiveElements.push(element);
+          }
+        }
+      }
+    }
+    
+    console.log(`📊 Parsed ${interactiveElements.length} interactive elements from AI vision`);
+    
+    // Check if pageType indicates login
+    if (pageType.toLowerCase().includes('login') || pageType.toLowerCase().includes('sign in')) {
+      loginInfo.isLoginPage = true;
+    }
+    
+    // If login page detected but no explicit shouldLogin, infer from context
+    if (loginInfo.isLoginPage && loginInfo.credentialsVisible && !loginInfo.shouldLogin) {
+      loginInfo.shouldLogin = true; // If credentials are visible, we should login
+    }
+    
+    // Also check description and full content for login indicators (using already-declared fullContentLower)
+    if (fullContentLower.includes('login page') || fullContentLower.includes('sign in page')) {
+      loginInfo.isLoginPage = true;
+    }
+    if (fullContentLower.includes('credential') && (fullContentLower.includes('visible') || fullContentLower.includes('shown'))) {
+      loginInfo.credentialsVisible = true;
+    }
+    
+    // Enhanced credential extraction from full content - prioritize structured format
+    // Do this even if loginInfo.isLoginPage is false initially - we'll set it if we find credentials
+    if (loginInfo.isLoginPage || fullContentLower.includes('credential') || fullContentLower.includes('demo')) {
+      console.log(`🔍 Searching for credentials in AI response...`);
+      
+      // First, look for the structured LOGIN_CREDENTIALS format
+      const structuredMatch = content.match(/LOGIN_CREDENTIALS[:\s]+Username[:\s]+([^\s\n]+)[\s]+Password[:\s]+([^\s\n]+)/i);
+      if (structuredMatch) {
+        console.log(`✅ Found structured LOGIN_CREDENTIALS format`);
+        if (!loginInfo.username) {
+          loginInfo.username = structuredMatch[1].trim().replace(/^["']+|["']+$/g, '');
+        }
+        if (!loginInfo.password) {
+          loginInfo.password = structuredMatch[2].trim().replace(/^["']+|["']+$/g, '');
+        }
+        loginInfo.credentialsVisible = true;
+        loginInfo.isLoginPage = true; // If credentials found, it's definitely a login page
+      }
+      
+      // Pattern 1: "Demo credentials (username: test, password: password)" - handles parentheses
+      if (!loginInfo.username || !loginInfo.password) {
+        const demoCredsMatch = content.match(/demo\s+credentials?\s*[\(:]?\s*(?:username|user)[\s:]+([^\s,)]+)[\s,)]+password[\s:]+([^\s,)]+)/i);
+        if (demoCredsMatch) {
+          console.log(`✅ Found demo credentials in parentheses format`);
+          if (!loginInfo.username) {
+            loginInfo.username = demoCredsMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+          if (!loginInfo.password) {
+            loginInfo.password = demoCredsMatch[2].trim().replace(/^["']+|["']+$/g, '');
+          }
+          loginInfo.credentialsVisible = true;
+          loginInfo.isLoginPage = true;
+        }
+      }
+      
+      // Pattern 2: "username: test, password: password" (comma-separated)
+      if (!loginInfo.username || !loginInfo.password) {
+        const commaSeparatedMatch = content.match(/(?:username|user\s*name)[\s:]+([^\s,]+)[\s,]+password[\s:]+([^\s,]+)/i);
+        if (commaSeparatedMatch) {
+          console.log(`✅ Found credentials in comma-separated format`);
+          if (!loginInfo.username) {
+            loginInfo.username = commaSeparatedMatch[1].trim().replace(/^["']+|["']+$/g, '');
+          }
+          if (!loginInfo.password) {
+            loginInfo.password = commaSeparatedMatch[2].trim().replace(/^["']+|["']+$/g, '');
+          }
+          loginInfo.credentialsVisible = true;
+          loginInfo.isLoginPage = true;
+        }
+      }
+      
+      // Pattern 3: Separate username and password lines/mentions
+      if (!loginInfo.username) {
+        const usernamePatterns = [
+          /(?:username|user\s*name|login)[\s:]+["']?([^"'\s,\n:\)]+)["']?/i,
+          /(?:username|user\s*name|login)[\s:]+([^\s,\n:\)]+)/i,
+          /username[\s:]+([a-zA-Z0-9_\-]+)/i, // Simple: "username: test"
+        ];
+        for (const pattern of usernamePatterns) {
+          const match = content.match(pattern);
+          if (match && match[1] && match[1].length > 1 && match[1].length < 100 && !match[1].includes('field')) {
+            loginInfo.username = match[1].trim().replace(/^["']+|["']+$/g, '');
+            console.log(`✅ Extracted username: "${loginInfo.username}"`);
+            break;
+          }
+        }
+      }
+      
+      if (!loginInfo.password) {
+        const passwordPatterns = [
+          /password[\s:]+["']?([^"'\s,\n:\)]+)["']?/i,
+          /password[\s:]+([^\s,\n:\)]+)/i,
+          /password[\s:]+([a-zA-Z0-9_\-]+)/i, // Simple: "password: password"
+        ];
+        for (const pattern of passwordPatterns) {
+          const match = content.match(pattern);
+          if (match && match[1] && match[1].length > 1 && match[1].length < 100 && !match[1].includes('field')) {
+            loginInfo.password = match[1].trim().replace(/^["']+|["']+$/g, '');
+            console.log(`✅ Extracted password: "${loginInfo.password}"`);
+            break;
+          }
+        }
+      }
+      
+      // If we found credentials, mark as login page and visible
+      if (loginInfo.username && loginInfo.password) {
+        loginInfo.credentialsVisible = true;
+        loginInfo.isLoginPage = true;
+        loginInfo.shouldLogin = true; // If credentials are found, we should login
+        console.log(`✅ Login page detected with credentials: username="${loginInfo.username}", password="${loginInfo.password}"`);
+      }
+    }
+
+    // Enhanced action extraction: Look for action-like patterns in the full content
+    // This catches cases where AI formats actions differently (numbered lists, bullets, etc.)
+    if (suggestedActions.length === 0) {
+      // Look for common action patterns in the full content
+      const actionPatterns = [
+        /(?:click|press|select|interact with|test|try|explore|navigate to|open|view|check|verify|use|activate|trigger)\s+([^\n\.]+)/gi,
+        /(?:should|can|could|might|recommend|suggest).*?(?:click|press|select|interact|test|try|explore|navigate|open|view|check|verify|use|activate|trigger)\s+([^\n\.]+)/gi,
+        /[-•*]\s*(?:click|press|select|interact|test|try|explore|navigate|open|view|check|verify|use|activate|trigger)\s+([^\n\.]+)/gi,
+        /\d+[\.\)]\s*(?:click|press|select|interact|test|try|explore|navigate|open|view|check|verify|use|activate|trigger)\s+([^\n\.]+)/gi,
+      ];
+      
+      for (const pattern of actionPatterns) {
+        const matches = content.matchAll(pattern);
+        for (const match of matches) {
+          if (match[1]) {
+            const actionText = match[1].trim();
+            // Filter out very short or generic actions
+            if (actionText.length >= 5 && actionText.length < 200 && 
+                !actionText.toLowerCase().includes('page') && 
+                !actionText.toLowerCase().includes('site')) {
+              const action = this.extractAction(actionText);
+              if (action && !suggestedActions.some(a => a.action.toLowerCase() === actionText.toLowerCase())) {
+                suggestedActions.push(action);
+                // Limit to 10 actions to avoid too many
+                if (suggestedActions.length >= 10) break;
+              }
+            }
+          }
+        }
+        if (suggestedActions.length >= 10) break;
+      }
+    }
 
     return {
       description: description.trim() || content.substring(0, 500),
@@ -267,13 +560,71 @@ Be specific and actionable. For each interactive element, describe what it likel
       risks: risks.length > 0 ? risks : [],
       architecture,
       siteCharacteristics: Object.keys(siteCharacteristics).length > 0 ? siteCharacteristics : undefined,
+      loginInfo: loginInfo.isLoginPage ? loginInfo : undefined,
     };
   }
 
-  private extractElement(line: string): InteractiveElement | null {
+  private extractElement(line: string, lines: string[], currentIndex: number): InteractiveElement | null {
     const lower = line.toLowerCase();
     let type: InteractiveElement['type'] = 'button';
     
+    // Check if this is the start of an element block (ELEMENT: format)
+    const elementMatch = line.match(/ELEMENT:\s*\[?([^\]]+)\]?\s*["']([^"']+)["']/i);
+    if (elementMatch) {
+      const typeStr = elementMatch[1].toLowerCase().trim();
+      const text = elementMatch[2].trim();
+      
+      if (typeStr.includes('button')) type = 'button';
+      else if (typeStr.includes('link')) type = 'link';
+      else if (typeStr.includes('input')) type = 'input';
+      else if (typeStr.includes('form')) type = 'form';
+      else if (typeStr.includes('dropdown') || typeStr.includes('select')) type = 'dropdown';
+      else if (typeStr.includes('checkbox')) type = 'checkbox';
+      else if (typeStr.includes('radio')) type = 'radio';
+      else return null;
+
+      // Parse subsequent lines for functional understanding
+      let location = 'unknown';
+      let purpose = '';
+      let behavior = '';
+      let workflow = '';
+      let relatedElements: string[] = [];
+      let expectedOutcome = '';
+
+      // Look ahead in lines for element metadata
+      for (let i = currentIndex + 1; i < Math.min(currentIndex + 10, lines.length); i++) {
+        const nextLine = lines[i].toLowerCase().trim();
+        if (nextLine.startsWith('element:') || nextLine.startsWith('---')) break; // Next element or section
+        
+        if (nextLine.startsWith('location:')) {
+          location = lines[i].replace(/^location:\s*/i, '').trim();
+        } else if (nextLine.startsWith('purpose:')) {
+          purpose = lines[i].replace(/^purpose:\s*/i, '').trim();
+        } else if (nextLine.startsWith('behavior:')) {
+          behavior = lines[i].replace(/^behavior:\s*/i, '').trim();
+        } else if (nextLine.startsWith('workflow:')) {
+          workflow = lines[i].replace(/^workflow:\s*/i, '').trim();
+        } else if (nextLine.startsWith('related:')) {
+          const relatedStr = lines[i].replace(/^related:\s*/i, '').trim();
+          relatedElements = relatedStr.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        } else if (nextLine.startsWith('expected:')) {
+          expectedOutcome = lines[i].replace(/^expected:\s*/i, '').trim();
+        }
+      }
+
+      return {
+        type,
+        description: text,
+        location: location || 'unknown',
+        purpose: purpose || text,
+        behavior: behavior || undefined,
+        workflow: workflow || undefined,
+        relatedElements: relatedElements.length > 0 ? relatedElements : undefined,
+        expectedOutcome: expectedOutcome || undefined,
+      };
+    }
+    
+    // Fallback: old format parsing
     if (lower.includes('button')) type = 'button';
     else if (lower.includes('link') || lower.includes('href')) type = 'link';
     else if (lower.includes('input') || lower.includes('text field')) type = 'input';
