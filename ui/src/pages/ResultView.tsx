@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import CollapsibleTestResults from '../components/CollapsibleTestResults';
+import CollapsibleTestCases from '../components/CollapsibleTestCases';
 
 interface TestResult {
   runId: string;
@@ -80,13 +81,13 @@ const ResultView: React.FC = () => {
     switch (activeTab) {
       case 'test-cases':
         return resultData.results['test-cases.md'] ? (
-          <div style={{ 
+          <div style={{
             padding: '24px',
             background: '#fff',
             borderRadius: '8px',
             maxWidth: '100%'
-          }} className="markdown-content">
-            <ReactMarkdown>{resultData.results['test-cases.md']}</ReactMarkdown>
+          }}>
+            <CollapsibleTestCases markdown={resultData.results['test-cases.md']} />
           </div>
         ) : (
           <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>
