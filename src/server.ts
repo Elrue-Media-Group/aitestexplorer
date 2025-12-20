@@ -253,7 +253,7 @@ app.get('/api/runs/:runId/screenshots/:filename', async (req: express.Request, r
   try {
     const { runId, filename } = req.params;
     const screenshotPath = join(__dirname, '../output', runId, 'screenshots', filename);
-    
+
     if (!existsSync(screenshotPath)) {
       return res.status(404).json({ error: 'Screenshot not found' });
     }
@@ -261,6 +261,22 @@ app.get('/api/runs/:runId/screenshots/:filename', async (req: express.Request, r
     res.sendFile(screenshotPath);
   } catch (error) {
     res.status(500).json({ error: 'Failed to serve screenshot' });
+  }
+});
+
+// Serve evidence files (failure screenshots, etc.)
+app.get('/api/runs/:runId/evidence/:filename', async (req: express.Request, res: express.Response) => {
+  try {
+    const { runId, filename } = req.params;
+    const evidencePath = join(__dirname, '../output', runId, 'evidence', filename);
+
+    if (!existsSync(evidencePath)) {
+      return res.status(404).json({ error: 'Evidence file not found' });
+    }
+
+    res.sendFile(evidencePath);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to serve evidence file' });
   }
 });
 

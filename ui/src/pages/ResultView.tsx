@@ -102,7 +102,7 @@ const ResultView: React.FC = () => {
             borderRadius: '8px',
             maxWidth: '100%'
           }}>
-            <CollapsibleTestResults markdown={resultData.results['test-results.md']} />
+            <CollapsibleTestResults markdown={resultData.results['test-results.md']} runId={runId} />
           </div>
         ) : (
           <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>
