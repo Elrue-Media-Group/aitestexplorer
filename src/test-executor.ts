@@ -189,14 +189,77 @@ export class TestExecutor {
 
       // Navigate action
       if (action === 'navigate' || description.includes('navigate')) {
-        const url = step.target || testCase.pageUrl || this.page.url();
+        const urlOrLinkText = target || testCase.pageUrl || this.page.url();
+
+        // Check if target is a valid URL or just link text
+        const isValidUrl = urlOrLinkText.startsWith('http://') ||
+                          urlOrLinkText.startsWith('https://') ||
+                          urlOrLinkText.startsWith('/');
+
+        if (!isValidUrl) {
+          // Target is link text (e.g., "Home", "Data Table") - find and click the link
+          console.log(`   🔗 Navigate target "${urlOrLinkText}" is link text, will click the link`);
+
+          const urlBeforeClick = this.page.url();
+
+          // Try to find and click the link
+          const selectors = [
+            `a:has-text("${urlOrLinkText}")`,
+            `text=${urlOrLinkText}`,
+            `[role="link"]:has-text("${urlOrLinkText}")`,
+          ];
+
+          let clicked = false;
+          for (const selector of selectors) {
+            try {
+              const link = await this.page.$(selector);
+              if (link) {
+                await link.click();
+                clicked = true;
+                console.log(`   ✅ Clicked link "${urlOrLinkText}" using selector: ${selector}`);
+                break;
+              }
+            } catch {
+              continue;
+            }
+          }
+
+          if (!clicked) {
+            throw new Error(`Could not find link with text: ${urlOrLinkText}`);
+          }
+
+          // Wait for navigation
+          await this.page.waitForLoadState('load', { timeout: 10000 });
+          await this.page.waitForTimeout(1000);
+          const currentUrl = this.page.url();
+
+          return {
+            stepNumber,
+            description: step.description,
+            action: 'navigate',
+            status: 'passed',
+            expected: `Click link "${urlOrLinkText}" to navigate`,
+            actual: `Clicked link "${urlOrLinkText}" → Navigated to ${currentUrl}`,
+            verified: currentUrl !== urlBeforeClick,
+            details: {
+              navigationInfo: {
+                sourceUrl: urlBeforeClick,
+                targetUrl: urlOrLinkText,
+                finalUrl: currentUrl,
+              },
+            },
+          };
+        }
+
+        // Target is a valid URL - use page.goto()
+        const url = urlOrLinkText;
         const startTime = Date.now();
         const response = await this.page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
         const loadTime = Date.now() - startTime;
         await this.page.waitForTimeout(1000);
         const currentUrl = this.page.url();
         const statusCode = response?.status();
-        
+
         const navigationInfo: NavigationInfo = {
           sourceUrl: this.page.url(),
           targetUrl: url,
@@ -204,7 +267,7 @@ export class TestExecutor {
           statusCode: statusCode || undefined,
           loadTime,
         };
-        
+
         return {
           stepNumber,
           description: step.description,

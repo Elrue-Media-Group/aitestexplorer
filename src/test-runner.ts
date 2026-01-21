@@ -204,14 +204,30 @@ export async function runTestAnalysis(
     };
 
     // Load context file if available (optional enhancement)
-    const domain = new URL(url).hostname.replace('www.', '');
-    const contextPath = join(process.cwd(), 'context', `${domain}.json`);
-    
+    // Try port-specific context first (e.g., localhost-3000.json), then fall back to domain-only (e.g., localhost.json)
+    const urlObj = new URL(url);
+    const domain = urlObj.hostname.replace('www.', '');
+    const port = urlObj.port;
+
+    // Try port-specific context first (for localhost development)
+    let contextPath = port
+      ? join(process.cwd(), 'context', `${domain}-${port}.json`)
+      : join(process.cwd(), 'context', `${domain}.json`);
+
+    // If port-specific doesn't exist, try domain-only
+    if (port && !existsSync(contextPath)) {
+      const domainOnlyPath = join(process.cwd(), 'context', `${domain}.json`);
+      if (existsSync(domainOnlyPath)) {
+        contextPath = domainOnlyPath;
+        console.log(`ℹ️  [TestRunner] Port-specific context not found, using domain context: ${domainOnlyPath}`);
+      }
+    }
+
     if (existsSync(contextPath)) {
       try {
         const contextContent = await readFile(contextPath, 'utf-8');
         const contextFile = JSON.parse(contextContent);
-        
+
         // Merge context file data into siteContext (like CLI does)
         if (contextFile.sitePurpose) siteContext.sitePurpose = contextFile.sitePurpose;
         if (contextFile.contentNature) siteContext.contentNature = contextFile.contentNature;
@@ -220,14 +236,14 @@ export async function runTestAnalysis(
         if (contextFile.testingGuidance) siteContext.testingGuidance = contextFile.testingGuidance;
         // Store full context file for reference
         siteContext.contextFile = contextFile;
-        console.log('✅ [TestRunner] Context file loaded and stored in siteContext');
+        console.log(`✅ [TestRunner] Context file loaded: ${contextPath}`);
         console.log('🔍 [TestRunner] siteContext.contextFile exists?', !!siteContext.contextFile);
         console.log('🔍 [TestRunner] siteContext.contextFile.credentials?', !!siteContext.contextFile?.credentials);
       } catch (error) {
         console.error('[TestRunner] Failed to load context file:', error);
       }
     } else {
-      console.log('ℹ️  [TestRunner] No context file found at:', contextPath);
+      console.log(`ℹ️  [TestRunner] No context file found. Tried: ${contextPath}${port ? ` and context/${domain}.json` : ''}`);
     }
 
     // Debug: Log what we're about to pass to test generator

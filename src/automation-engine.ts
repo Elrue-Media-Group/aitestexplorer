@@ -10,7 +10,7 @@
  */
 
 import { Browser, Page, chromium } from 'playwright';
-import { Config, PageState, Action, VisionAnalysis } from './types.js';
+import { Config, PageState, Action, VisionAnalysis, SuggestedAction } from './types.js';
 import { AIVisionService } from './ai-vision.js';
 import { mkdir, writeFile, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -28,6 +28,11 @@ export class AutomationEngine {
   private runScreenshotDir: string = '';
   private navigationGuardActive = false;
   private lastNavigationTime = 0;
+  private allowedDomains: string[] = [];
+  private excludeElements: string[] = [];
+  private hasCompletedLogin: boolean = false;  // Track if we've successfully logged in this session
+  private siteContext: { siteDescription?: string; importantTests?: any[]; loginInstructions?: string } = {};  // Context from context file for AI
+  private failedActions: Map<string, number> = new Map();  // Track failed/timed-out actions to prevent loops
 
   constructor(config: Config) {
     this.config = config;
@@ -75,6 +80,11 @@ export class AutomationEngine {
     this.pagesVisited.clear();
     this.navigationGuardActive = false;
     this.lastNavigationTime = 0;
+    this.hasCompletedLogin = false;  // Reset login state for fresh exploration
+    this.failedActions.clear();  // Reset failed actions tracking
+
+    // Version marker for debugging - increment when making changes
+    console.log(`🔧 AutomationEngine v2.4 - AI action matching (no random clicks)`);
 
     // Store the starting domain to filter external links
     try {
@@ -83,6 +93,9 @@ export class AutomationEngine {
     } catch {
       throw new Error(`Invalid start URL: ${startUrl}`);
     }
+
+    // Load allowed domains from context file (for OAuth/SSO flows like Cognito)
+    await this.loadAllowedDomains(startUrl);
 
     // Set up navigation guard to prevent leaving the domain
     // Only intercept document/navigation requests, allow all other requests
@@ -107,23 +120,13 @@ export class AutomationEngine {
       
       // Only block document/navigation requests to external domains
       if (resourceType === 'document') {
-        try {
-          const requestDomain = new URL(url).hostname;
-          // Normalize domains (remove www. prefix for comparison)
-          const normalizedRequestDomain = requestDomain.replace(/^www\./, '');
-          const normalizedStartDomain = this.startDomain.replace(/^www\./, '');
-          
-          if (normalizedRequestDomain === normalizedStartDomain) {
-            await route.continue();
-          } else {
-            // Block external domain navigations
-            console.log(`🚫 Blocked external navigation to: ${url}`);
-            await route.abort();
-          }
-        } catch (error) {
-          // If URL parsing fails, allow it (might be a data URL, blob, or similar)
-          // Better to allow than block and break the page
+        // Use isDomainAllowed which checks both start domain and allowedDomains list
+        if (this.isDomainAllowed(url)) {
           await route.continue();
+        } else {
+          // Block external domain navigations
+          console.log(`🚫 Blocked external navigation to: ${url}`);
+          await route.abort();
         }
       } else {
         // Allow all non-document requests (API calls, analytics, etc.)
@@ -137,56 +140,43 @@ export class AutomationEngine {
       if (frame === this.page!.mainFrame() && !this.navigationGuardActive) {
         const currentUrl = frame.url();
         const now = Date.now();
-        
+
         // Prevent rapid-fire navigation attempts (rate limiting)
         if (now - this.lastNavigationTime < 1000) {
           return; // Ignore if navigation happened less than 1 second ago
         }
-        
-        try {
+
+        // Use isDomainAllowed which checks both start domain and allowedDomains list
+        if (!this.isDomainAllowed(currentUrl)) {
           const currentDomain = new URL(currentUrl).hostname;
-          const normalizedCurrentDomain = currentDomain.replace(/^www\./, '');
-          const normalizedStartDomain = this.startDomain.replace(/^www\./, '');
-          
-          if (normalizedCurrentDomain !== normalizedStartDomain) {
-            console.log(`🚫 Detected navigation to external domain: ${currentDomain}, navigating back...`);
-            this.navigationGuardActive = true;
-            this.lastNavigationTime = now;
-            
-            try {
-              // Navigate back to the last visited same-domain URL
-              const sameDomainUrls = Array.from(this.visitedUrls).filter(url => {
-                try {
-                  const urlDomain = new URL(url).hostname.replace(/^www\./, '');
-                  return urlDomain === normalizedStartDomain;
-                } catch {
-                  return false;
-                }
+          console.log(`🚫 Detected navigation to external domain: ${currentDomain}, navigating back...`);
+          this.navigationGuardActive = true;
+          this.lastNavigationTime = now;
+
+          try {
+            // Navigate back to the last visited allowed-domain URL
+            const allowedUrls = Array.from(this.visitedUrls).filter(url => this.isDomainAllowed(url));
+
+            if (allowedUrls.length > 0) {
+              await this.page!.goto(allowedUrls[allowedUrls.length - 1], {
+                waitUntil: 'domcontentloaded',
+                timeout: 10000
               });
-              
-              if (sameDomainUrls.length > 0) {
-                await this.page!.goto(sameDomainUrls[sameDomainUrls.length - 1], { 
-                  waitUntil: 'domcontentloaded', 
-                  timeout: 10000 
-                });
-              } else {
-                await this.page!.goto(startUrl, { 
-                  waitUntil: 'domcontentloaded', 
-                  timeout: 10000 
-                });
-              }
-            } catch (navError) {
-              console.error(`⚠️  Failed to navigate back: ${navError instanceof Error ? navError.message : String(navError)}`);
-              // Don't retry - break the loop
-            } finally {
-              // Reset guard after a delay to allow navigation to complete
-              setTimeout(() => {
-                this.navigationGuardActive = false;
-              }, 2000);
+            } else {
+              await this.page!.goto(startUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 10000
+              });
             }
+          } catch (navError) {
+            console.error(`⚠️  Failed to navigate back: ${navError instanceof Error ? navError.message : String(navError)}`);
+            // Don't retry - break the loop
+          } finally {
+            // Reset guard after a delay to allow navigation to complete
+            setTimeout(() => {
+              this.navigationGuardActive = false;
+            }, 2000);
           }
-        } catch {
-          // If URL parsing fails, ignore - don't trigger navigation
         }
       }
     });
@@ -263,21 +253,30 @@ export class AutomationEngine {
             console.log(`🆕 Login succeeded but URL unchanged (SPA) - analyzing post-login content...`);
             console.log(`   Current URL: ${urlAfterAnalysis}`);
             console.log(`   Immediately analyzing post-login page content...`);
-            
+
+            // AI-DRIVEN: Clear pre-login URLs from queue - we're now in authenticated state
+            // This allows the AI to discover fresh links from the authenticated page
+            const preLoginQueueSize = urlsToVisit.length;
+            if (preLoginQueueSize > 0) {
+              console.log(`🔄 LOGIN TRANSITION: Clearing ${preLoginQueueSize} pre-login URLs from queue`);
+              console.log(`   (These were discovered before login - let AI discover authenticated links instead)`);
+              urlsToVisit.length = 0; // Clear the queue
+            }
+
             try {
               // Wait for page to stabilize after login
               await this.page.waitForTimeout(2000);
-              
+
               // Create a unique identifier for the post-login state (same URL but different content)
               // Use a special prefix that won't be normalized away
               const postLoginUrlIdentifier = `POST_LOGIN:${urlAfterAnalysis}`;
-              
+
               // Check if we've already analyzed this post-login state
               // Use the identifier directly (not normalized) to preserve uniqueness
               if (!this.visitedUrls.has(postLoginUrlIdentifier)) {
                 console.log(`   Analyzing post-login page (identifier: ${postLoginUrlIdentifier})...`);
                 console.log(`   🔓 Passing explicit post-login flag to AI analysis`);
-                
+
                 // Analyze the post-login page with explicit post-login flag
                 const postLoginPageState = await this.analyzeAndInteract(urlAfterAnalysis, true);
                 // Mark it as post-login
@@ -285,10 +284,10 @@ export class AutomationEngine {
                 (postLoginPageState as any).postLoginState = true;
                 // Use the post-login identifier as the URL to distinguish it from the login page
                 postLoginPageState.url = postLoginUrlIdentifier;
-                
+
                 pages.push(postLoginPageState);
                 console.log(`✅ Successfully analyzed post-login page: ${postLoginUrlIdentifier} (${pages.length} total pages)`);
-                
+
                 // Mark as visited so we don't re-analyze it (use identifier directly, not normalized)
                 this.visitedUrls.add(postLoginUrlIdentifier);
                 postLoginUrl = urlAfterAnalysis; // Use actual URL for link extraction
@@ -304,22 +303,33 @@ export class AutomationEngine {
             if (!this.visitedUrls.has(normalizedNewUrl) && this.isSameDomain(urlAfterAnalysis, startUrl)) {
               console.log(`🆕 URL changed after analysis (likely login): ${urlAfterAnalysis}`);
               console.log(`   Immediately analyzing post-login page...`);
-              
+
+              // AI-DRIVEN: Clear pre-login URLs from queue when login completes
+              const preLoginQueueSize = urlsToVisit.length;
+              if (preLoginQueueSize > 0) {
+                console.log(`🔄 LOGIN TRANSITION: Clearing ${preLoginQueueSize} pre-login URLs from queue`);
+                console.log(`   (These were discovered before login - let AI discover authenticated links instead)`);
+                urlsToVisit.length = 0; // Clear the queue
+              }
+
               // CRITICAL: Analyze the post-login page IMMEDIATELY while authenticated
               // Don't just add it to the queue - analyze it now before session expires
               try {
                 // Wait for page to stabilize after login
                 await this.page.waitForTimeout(2000);
-                
+
                 // Analyze the post-login page
-                const postLoginPageState = await this.analyzeAndInteract(urlAfterAnalysis);
+                const postLoginPageState = await this.analyzeAndInteract(urlAfterAnalysis, true);
+                // Mark as post-login for AI context
+                (postLoginPageState as any).isPostLogin = true;
+                (postLoginPageState as any).postLoginState = true;
                 pages.push(postLoginPageState);
                 console.log(`✅ Successfully analyzed post-login page: ${urlAfterAnalysis} (${pages.length} total pages)`);
-                
+
                 // Mark as visited so we don't re-analyze it
                 this.visitedUrls.add(normalizedNewUrl);
                 postLoginUrl = urlAfterAnalysis;
-                
+
                 // Make sure we're still on the post-login page for link extraction
                 if (this.page.url() !== urlAfterAnalysis) {
                   // If we navigated away, go back to the post-login page
@@ -339,8 +349,26 @@ export class AutomationEngine {
           // Extract new URLs from the current page
           // After login, this will extract from the post-login page (where we are now)
           // Otherwise, it extracts from the page we just analyzed
-          // CRITICAL: Make sure we're on the right page (post-login if login happened)
-          const pageToExtractFrom = postLoginUrl || currentUrl;
+          // CRITICAL: If we just logged in, use the CURRENT browser URL (where we landed after login)
+          // Don't navigate back to the pre-login URL!
+          const actualCurrentUrl = this.page.url();
+          let pageToExtractFrom: string;
+
+          if (this.hasCompletedLogin && actualCurrentUrl !== currentUrl) {
+            // Login completed and browser is on a different URL - use that URL for link extraction
+            console.log(`🔓 Login completed - extracting links from authenticated page: ${actualCurrentUrl}`);
+            pageToExtractFrom = actualCurrentUrl;
+            // Also mark this authenticated URL as visited so we don't navigate back to it
+            this.visitedUrls.add(this.normalizeUrl(actualCurrentUrl));
+          } else if (postLoginUrl) {
+            // Post-login URL was explicitly set by the analysis branches above
+            pageToExtractFrom = postLoginUrl;
+          } else {
+            // Normal case - use the URL we intended to analyze
+            pageToExtractFrom = currentUrl;
+          }
+
+          // Only navigate if we're not already on the target page
           if (this.page.url() !== pageToExtractFrom) {
             console.log(`🔄 Navigating to correct page for link extraction: ${pageToExtractFrom}`);
             await this.page.goto(pageToExtractFrom, { waitUntil: 'load', timeout: 30000 });
@@ -454,28 +482,40 @@ export class AutomationEngine {
       .slice(-5); // Last 5 actions for context
     
     // Check if we just logged in - add context for post-login exploration
-    // Use explicit flag OR check previous actions
-    const justLoggedIn = isPostLoginAnalysis || previousActions.some(a => 
-      a.toLowerCase().includes('login') || 
-      a.toLowerCase().includes('sign in') ||
-      a.toLowerCase().includes('authenticated')
-    );
+    // ONLY use explicit flags - NOT action text matching (unreliable)
+    // Action text "Sign In" just means we clicked the login button, not that login succeeded
+    const justLoggedIn = isPostLoginAnalysis || this.hasCompletedLogin;
     
     // Build context for AI - explicitly tell it this is post-login if flag is set
     let contextActions: string[];
     if (isPostLoginAnalysis) {
       // Explicit post-login context - be very clear with the AI
       contextActions = [
-        'CRITICAL CONTEXT: This is a POST-LOGIN page analysis.',
-        'The user has successfully logged in and the page content has changed.',
-        'The URL may be the same as the login page, but this is the authenticated state.',
-        'Your goal is to explore and test ALL features, links, buttons, and workflows available in this authenticated area.',
-        'This is where the real application functionality exists - explore thoroughly.',
-        'Generate actions to click buttons, follow links, test forms, and discover all interactive elements.',
+        '=== POST-LOGIN AUTHENTICATED STATE ===',
+        'You have SUCCESSFULLY LOGGED IN. This is the authenticated app.',
+        'The URL may be the same as the login page, but the page CONTENT is now the authenticated dashboard/home.',
+        '',
+        'YOUR MISSION NOW: Explore the authenticated application thoroughly.',
+        '1. Look for navigation menus, sidebar links, dashboard buttons',
+        '2. Generate SPECIFIC click actions for each visible link/button (e.g., ACTION: Click "Dashboard")',
+        '3. DO NOT suggest login actions - you are already logged in',
+        '4. Prioritize exploring: Dashboard, Settings, Profile, Data views, Action buttons',
+        '',
+        'REMEMBER: Generate actions like:',
+        '  ACTION: Click "Dashboard"',
+        '  ACTION: Click "Settings"',
+        '  ACTION: Click "View Reports"',
+        'NOT generic actions like "Explore navigation"',
         ...previousActions
       ];
     } else if (justLoggedIn) {
-      contextActions = [...previousActions, 'Just completed login - now exploring authenticated area. Focus on discovering all available features, links, and workflows on this post-login page.'];
+      contextActions = [
+        '=== AUTHENTICATED STATE - POST LOGIN ===',
+        'Login completed successfully. You are now in the authenticated area.',
+        'Focus on discovering and clicking all navigation links, buttons, and features.',
+        'Generate SPECIFIC click actions for visible elements.',
+        ...previousActions
+      ];
     } else {
       contextActions = previousActions;
     }
@@ -488,7 +528,7 @@ export class AutomationEngine {
         console.log('   📌 Explicit post-login analysis flag set - AI will receive strong post-login context');
       }
     }
-    const analysis = await this.visionService.analyzePage(screenshotPath, url, contextActions);
+    const analysis = await this.visionService.analyzePage(screenshotPath, url, contextActions, this.siteContext);
 
     // Perform actions based on AI suggestions
     // maxActions limits the total number of actions across ALL pages
@@ -535,6 +575,21 @@ export class AutomationEngine {
         break;
       }
 
+      // Check if this action targets an excluded element
+      if (this.isElementExcluded(suggestion.action)) {
+        console.log(`🚫 Skipping excluded element: ${suggestion.action}`);
+        continue;
+      }
+
+      // LOOP DETECTION: Check if this action has failed/timed out before
+      // Normalize action text for comparison (lowercase, trim, remove extra whitespace)
+      const normalizedAction = suggestion.action.toLowerCase().trim().replace(/\s+/g, ' ');
+      const failCount = this.failedActions.get(normalizedAction) || 0;
+      if (failCount >= 2) {
+        console.log(`🔄 Skipping action that failed ${failCount} times: ${suggestion.action}`);
+        continue;
+      }
+
       try {
         const action = await this.performAction(suggestion, analysis);
         if (action && action.type !== 'wait') {
@@ -543,21 +598,31 @@ export class AutomationEngine {
           actions.push(action);
           this.actionCount++;
           console.log(`✅ Performed action ${this.actionCount}/${this.config.maxActions}: ${action.description}`);
-          
+
+          // Clear failure count on success
+          this.failedActions.delete(normalizedAction);
+
           // Wait a bit between actions
           await this.page!.waitForTimeout(1000);
         } else if (action && action.type === 'wait') {
           // Log wait actions but don't count them
+          // Wait actions often indicate timeouts - track them for loop detection
           actions.push(action);
           console.log(`⏸️  Wait action (not counted): ${action.description}`);
+
+          // Track this as a failed/timeout action
+          this.failedActions.set(normalizedAction, failCount + 1);
+          console.log(`📊 Action failure count: ${normalizedAction} = ${failCount + 1}`);
         } else {
           console.log(`⚠️  Could not perform action: ${suggestion.action} (no matching elements found)`);
-          // Don't count failed/null actions - they're not real interactions
+          // Track null results as failures too
+          this.failedActions.set(normalizedAction, failCount + 1);
         }
       } catch (error) {
         console.error(`Error performing action: ${suggestion.action}`, error);
-        // Don't count failed actions as real actions - they didn't actually interact
-        // Only log for debugging, but don't increment actionCount
+        // Track errors as failures
+        this.failedActions.set(normalizedAction, failCount + 1);
+        console.log(`📊 Action failure count (error): ${normalizedAction} = ${failCount + 1}`);
       }
     }
 
@@ -574,11 +639,28 @@ export class AutomationEngine {
     this.pagesVisited.set(url, pageState);
 
     // CRITICAL: Check for login page and attempt login
+    // BUT skip if this is a post-login analysis (we already logged in successfully)
+    // OR if AI-driven actions already handled credentials
+
+    // Check if AI-driven credential actions were performed
+    const aiFilledCredentials = actions.some(a =>
+      a.description?.includes('Filled username field') ||
+      a.description?.includes('Filled password field')
+    );
+
+    if (aiFilledCredentials) {
+      console.log(`🤖 AI-driven credential actions detected - skipping performLogin fallback`);
+    }
+
     // Strategy 1: Use AI detection if available
     let shouldAttemptLogin = false;
     let credentials: { username?: string; password?: string } = {};
-    
-    if (analysis.loginInfo && analysis.loginInfo.isLoginPage) {
+
+    // Skip login attempts if we're analyzing a post-login page OR we've already logged in this session
+    // OR if AI already filled credentials
+    if (isPostLoginAnalysis || justLoggedIn || this.hasCompletedLogin || aiFilledCredentials) {
+      console.log(`⏭️  Skipping login check - already logged in or AI handled it (isPostLoginAnalysis=${isPostLoginAnalysis}, justLoggedIn=${justLoggedIn}, hasCompletedLogin=${this.hasCompletedLogin}, aiFilledCredentials=${aiFilledCredentials})`);
+    } else if (analysis.loginInfo && analysis.loginInfo.isLoginPage) {
       console.log(`🤖 AI detected login page: ${url}`);
       
       if (analysis.loginInfo.shouldLogin) {
@@ -618,6 +700,7 @@ export class AutomationEngine {
       console.log(`🔑 Attempting login with username="${credentials.username}"`);
       const loginResult = await this.performLogin({ username: credentials.username, password: credentials.password });
       if (loginResult && loginResult.success) {
+        this.hasCompletedLogin = true;  // Mark session as logged in - prevents re-login attempts on other pages
         if (loginResult.newUrl && loginResult.newUrl !== url) {
           console.log(`🔓 Login successful! URL changed from ${url} to ${loginResult.newUrl}`);
           // The post-login page will be handled by the exploreWebsite loop
@@ -641,56 +724,66 @@ export class AutomationEngine {
   }
   
   /**
-   * Get credentials for login - prioritize AI-extracted, fallback to context file
+   * Get credentials for login - only use context file (AI extraction is disabled)
    */
-  private async getCredentialsForLogin(url: string, loginInfo: import('./types.js').LoginInfo): Promise<{ username?: string; password?: string }> {
-    // First, use AI-extracted credentials if available
-    if (loginInfo.username && loginInfo.password) {
-      // Strip quotes and whitespace from AI-extracted credentials (AI sometimes includes quotes)
-      const username = loginInfo.username.trim().replace(/^["']+|["']+$/g, '');
-      const password = loginInfo.password.trim().replace(/^["']+|["']+$/g, '');
-      return { username, password };
-    }
-    
-    // Fallback to context file
+  private async getCredentialsForLogin(url: string, _loginInfo: import('./types.js').LoginInfo): Promise<{ username?: string; password?: string }> {
+    // AI-extracted credentials are disabled - they were extracting garbage from markdown
+    // (e.g., "Password:" label text being treated as username)
+    // Context file is now the only source of credentials
+
+    // Get credentials from context file
     try {
       const urlObj = new URL(url);
       let domain = urlObj.hostname;
       if (domain.startsWith('www.')) {
         domain = domain.substring(4);
       }
-      
-      // Try exact hostname first (e.g., localhost.json)
-      let contextPath = join(process.cwd(), 'context', `${domain}.json`);
-      
-      // If that doesn't exist and we have a port, try with port (e.g., localhost:3000.json)
-      if (!existsSync(contextPath) && urlObj.port) {
-        const domainWithPort = `${domain}:${urlObj.port}`;
-        contextPath = join(process.cwd(), 'context', `${domainWithPort}.json`);
+      const port = urlObj.port;
+
+      // Try port-specific context first (e.g., localhost-4002.json), then fall back to domain-only
+      let contextPath = port
+        ? join(process.cwd(), 'context', `${domain}-${port}.json`)
+        : join(process.cwd(), 'context', `${domain}.json`);
+
+      // If port-specific doesn't exist, try domain-only as fallback
+      if (port && !existsSync(contextPath)) {
+        console.log(`📂 Port-specific context not found, trying domain-only`);
+        contextPath = join(process.cwd(), 'context', `${domain}.json`);
       }
-      
+
       console.log(`📂 Checking for context file: ${contextPath}`);
       
       if (existsSync(contextPath)) {
         console.log(`✅ Found context file: ${contextPath}`);
         const contextContent = await readFile(contextPath, 'utf-8');
         const contextFile = JSON.parse(contextContent);
-        
+
+        // Check authentication.credentials (for Cognito/OAuth flows)
+        if (contextFile.authentication?.credentials) {
+          const creds = contextFile.authentication.credentials;
+          console.log(`✅ Found authentication.credentials in context file`);
+          return {
+            username: creds.email || creds.username,
+            password: creds.password,
+          };
+        }
+        // Check top-level credentials
         if (contextFile.credentials) {
           console.log(`✅ Found credentials in context file`);
           return {
-            username: contextFile.credentials.username,
+            username: contextFile.credentials.email || contextFile.credentials.username,
             password: contextFile.credentials.password,
           };
         }
+        // Check demoCredentials
         if (contextFile.demoCredentials) {
           console.log(`✅ Found demoCredentials in context file`);
           return {
-            username: contextFile.demoCredentials.username,
+            username: contextFile.demoCredentials.email || contextFile.demoCredentials.username,
             password: contextFile.demoCredentials.password,
           };
         }
-        console.log(`⚠️  Context file exists but no credentials found (checked 'credentials' and 'demoCredentials' fields)`);
+        console.log(`⚠️  Context file exists but no credentials found (checked 'authentication.credentials', 'credentials', and 'demoCredentials' fields)`);
       } else {
         console.log(`⚠️  Context file not found: ${contextPath}`);
       }
@@ -701,65 +794,527 @@ export class AutomationEngine {
     
     return {};
   }
-  
+
+  /**
+   * Helper to find a button by matching text content
+   */
+  private async findButtonByText(textMatches: string[]): Promise<import('playwright').ElementHandle<Element> | null> {
+    if (!this.page) return null;
+
+    const allButtons = await this.page.$$('button, input[type="submit"]');
+    for (const btn of allButtons) {
+      const btnText = await btn.textContent();
+      const textLower = (btnText || '').toLowerCase().trim();
+      for (const match of textMatches) {
+        if (textLower.includes(match)) {
+          return btn;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Find input field dynamically by type (username or password)
+   * AI-driven approach: looks at DOM attributes to find the right field
+   */
+  private async findInputFieldByType(fieldType: 'username' | 'password'): Promise<import('playwright').ElementHandle<Element> | null> {
+    if (!this.page) return null;
+
+    if (fieldType === 'password') {
+      // Password fields are easy - look for type="password"
+      const passwordField = await this.page.$('input[type="password"]');
+      if (passwordField) {
+        console.log(`🔍 Found password field by type="password"`);
+        return passwordField;
+      }
+      // Fallback: look for name/id containing "password"
+      const passwordByName = await this.page.$('input[name*="password" i], input[id*="password" i]');
+      if (passwordByName) {
+        console.log(`🔍 Found password field by name/id containing "password"`);
+        return passwordByName;
+      }
+    } else {
+      // Username/email field detection - try multiple strategies
+      // Strategy 1: type="email" is most reliable
+      const emailField = await this.page.$('input[type="email"]');
+      if (emailField) {
+        console.log(`🔍 Found username field by type="email"`);
+        return emailField;
+      }
+
+      // Strategy 2: name/id containing common patterns
+      const usernameByName = await this.page.$('input[name*="user" i], input[name*="email" i], input[name*="login" i], input[id*="user" i], input[id*="email" i]');
+      if (usernameByName) {
+        console.log(`🔍 Found username field by name/id pattern`);
+        return usernameByName;
+      }
+
+      // Strategy 3: placeholder containing username/email
+      const allTextInputs = await this.page.$$('input[type="text"], input:not([type])');
+      for (const input of allTextInputs) {
+        const placeholder = await input.getAttribute('placeholder');
+        const ariaLabel = await input.getAttribute('aria-label');
+        const combined = `${placeholder || ''} ${ariaLabel || ''}`.toLowerCase();
+        if (combined.includes('user') || combined.includes('email') || combined.includes('login')) {
+          console.log(`🔍 Found username field by placeholder/aria-label: "${placeholder || ariaLabel}"`);
+          return input;
+        }
+      }
+
+      // Strategy 4: First visible text input that's not password
+      const firstTextInput = await this.page.$('input[type="text"]:visible, input:not([type]):visible');
+      if (firstTextInput) {
+        console.log(`🔍 Found username field as first visible text input`);
+        return firstTextInput;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Handle Cognito session continuation page ("Sign in as [email]" button)
+   * This appears when user has an existing Cognito session
+   * Returns: 'success' if login completed, 'not_found' if no session continue button, 'clicked' if button clicked but need more handling
+   */
+  private async handleCognitoSessionContinuation(originalAppUrl: string): Promise<'success' | 'not_found' | 'clicked'> {
+    if (!this.page) return 'not_found';
+
+    console.log(`🔍 Checking for Cognito session continuation button...`);
+
+    // Look for "Sign in as [email]" button - Cognito session continuation
+    const buttons = await this.page.$$('button');
+    let sessionContinueButton: import('playwright').ElementHandle<Element> | null = null;
+
+    for (const btn of buttons) {
+      const btnText = await btn.textContent();
+      const textLower = (btnText || '').toLowerCase().trim();
+      // Match patterns like "sign in as email@example.com" or "continue as email@example.com"
+      if (textLower.includes('sign in as') || textLower.includes('continue as')) {
+        sessionContinueButton = btn;
+        console.log(`🔑 Found Cognito session continuation button: "${btnText?.trim()}"`);
+        break;
+      }
+    }
+
+    if (!sessionContinueButton) {
+      // Also check for submit buttons with value containing "sign in as"
+      const submitButtons = await this.page.$$('input[type="submit"]');
+      for (const btn of submitButtons) {
+        const value = await btn.getAttribute('value');
+        const valueLower = (value || '').toLowerCase();
+        if (valueLower.includes('sign in as') || valueLower.includes('continue as')) {
+          sessionContinueButton = btn;
+          console.log(`🔑 Found Cognito session continuation submit button: "${value}"`);
+          break;
+        }
+      }
+    }
+
+    if (!sessionContinueButton) {
+      console.log(`⚠️  No session continuation button found`);
+      return 'not_found';
+    }
+
+    // Click the session continuation button
+    console.log(`🔘 Clicking session continuation button...`);
+    await sessionContinueButton.click();
+
+    // Wait for redirect back to app
+    try {
+      await this.page.waitForNavigation({ timeout: 15000, waitUntil: 'domcontentloaded' });
+    } catch {
+      await this.page.waitForTimeout(3000);
+    }
+
+    const newUrl = this.page.url();
+    console.log(`🔗 After session continuation, URL: ${newUrl}`);
+
+    // Check if we're back on the original app domain (login succeeded)
+    try {
+      const originalHost = new URL(originalAppUrl).hostname;
+      const currentHost = new URL(newUrl).hostname;
+
+      if (currentHost === originalHost || (originalHost === 'localhost' && currentHost === 'localhost')) {
+        console.log(`✅ Session continuation successful - redirected back to app`);
+        return 'success';
+      }
+    } catch {
+      // URL parsing failed, continue
+    }
+
+    // Still on OAuth provider - might need credential entry
+    console.log(`📍 Still on OAuth provider after session continue click`);
+    return 'clicked';
+  }
+
   /**
    * Perform login using provided credentials - simplified version that uses AI guidance
    */
   private async performLogin(credentials: { username: string; password: string }): Promise<{ success: boolean; newUrl?: string } | null> {
     if (!this.page) return null;
-    
+
     const currentUrl = this.page.url();
-    
+
     try {
       // Find username/email field
-      const usernameInputs = await this.page.$$('input[type="text"], input[type="email"]');
-      const passwordInputs = await this.page.$$('input[type="password"]');
-      
+      let usernameInputs = await this.page.$$('input[type="text"], input[type="email"]');
+      let passwordInputs = await this.page.$$('input[type="password"]');
+
+      // OAUTH/COGNITO FLOW: If no input fields, look for a Sign In button to click first
+      // This handles redirect-based auth (Cognito, Auth0, Okta, etc.)
       if (usernameInputs.length === 0 || passwordInputs.length === 0) {
-        console.log(`⚠️  Could not find username/password fields`);
-        return null;
-      }
+        console.log(`🔄 No credential fields found - checking for OAuth/redirect login flow...`);
 
-      // Fill in credentials
-      await usernameInputs[0].fill(credentials.username);
-      await this.page.waitForTimeout(500);
-      await passwordInputs[0].fill(credentials.password);
-      await this.page.waitForTimeout(500);
+        // Look for a Sign In button that triggers OAuth redirect
+        let oauthButton = await this.page.$('button[type="submit"], input[type="submit"]');
 
-      // Find and click submit button
-      let submitButton = await this.page.$('button[type="submit"], input[type="submit"]');
-      
-      if (!submitButton) {
-        const allButtons = await this.page.$$('button');
-        for (const btn of allButtons) {
-          const btnText = await btn.textContent();
-          const textLower = (btnText || '').toLowerCase();
-          if (textLower.includes('sign in') || textLower.includes('login') || textLower.includes('log in')) {
-            submitButton = btn;
-            break;
+        if (!oauthButton) {
+          const allButtons = await this.page.$$('button');
+          for (const btn of allButtons) {
+            const btnText = await btn.textContent();
+            const textLower = (btnText || '').toLowerCase().trim();
+            // Match "Sign In", "Login", "Log in", "Continue with...", etc.
+            if (textLower === 'sign in' || textLower === 'login' || textLower === 'log in' ||
+                textLower.includes('sign in') || textLower.includes('continue')) {
+              oauthButton = btn;
+              console.log(`🔗 Found OAuth trigger button: "${btnText?.trim()}"`);
+              break;
+            }
           }
         }
-      }
-      
-      if (!submitButton) {
-        const form = await this.page.$('form');
-        if (form) {
-          const formButtons = await form.$$('button');
-          if (formButtons.length > 0) {
-            submitButton = formButtons[0];
+
+        // Also check for links styled as buttons
+        if (!oauthButton) {
+          const allLinks = await this.page.$$('a');
+          for (const link of allLinks) {
+            const linkText = await link.textContent();
+            const textLower = (linkText || '').toLowerCase().trim();
+            if (textLower === 'sign in' || textLower === 'login' || textLower === 'log in') {
+              oauthButton = link;
+              console.log(`🔗 Found OAuth trigger link: "${linkText?.trim()}"`);
+              break;
+            }
           }
         }
+
+        if (oauthButton) {
+          console.log(`🔗 Clicking OAuth button to trigger redirect...`);
+          await oauthButton.click();
+
+          // Wait for navigation to OAuth provider
+          try {
+            await this.page.waitForNavigation({ timeout: 10000, waitUntil: 'domcontentloaded' });
+          } catch {
+            // Navigation might have already happened or be slow
+            await this.page.waitForTimeout(3000);
+          }
+
+          const oauthUrl = this.page.url();
+          console.log(`🔗 Redirected to: ${oauthUrl}`);
+
+          // Now look for credential fields on the OAuth provider page
+          // Wait a moment for the page to fully load
+          await this.page.waitForTimeout(1000);
+
+          // Re-check for credential fields on OAuth page
+          usernameInputs = await this.page.$$('input[type="text"], input[type="email"]');
+          passwordInputs = await this.page.$$('input[type="password"]');
+
+          // Cognito has specific selectors - try those too
+          if (usernameInputs.length === 0) {
+            const cognitoUsername = await this.page.$('input[name="username"], input[name="signInFormUsername"], #signInFormUsername');
+            if (cognitoUsername) {
+              usernameInputs = [cognitoUsername];
+              console.log(`🔑 Found Cognito username field`);
+            }
+          }
+          if (passwordInputs.length === 0) {
+            const cognitoPassword = await this.page.$('input[name="password"], input[name="signInFormPassword"], #signInFormPassword');
+            if (cognitoPassword) {
+              passwordInputs = [cognitoPassword];
+              console.log(`🔑 Found Cognito password field`);
+            }
+          }
+
+          if (usernameInputs.length === 0) {
+            // Check if we're on an intermediate login page (same app domain) that needs another click
+            const currentHost = new URL(this.page.url()).hostname;
+            const originalHost = new URL(currentUrl).hostname;
+
+            if (currentHost === originalHost || currentHost === 'localhost') {
+              console.log(`📍 Redirected to intermediate login page on same domain: ${oauthUrl}`);
+              console.log(`🔍 Looking for another Sign In button to trigger OAuth...`);
+
+              // Look for another OAuth trigger button on this intermediate page
+              let secondOauthButton: import('playwright').ElementHandle<Element> | null = null;
+
+              const buttons = await this.page.$$('button');
+              for (const btn of buttons) {
+                const btnText = await btn.textContent();
+                const textLower = (btnText || '').toLowerCase().trim();
+                if (textLower === 'sign in' || textLower === 'login' || textLower === 'log in') {
+                  secondOauthButton = btn;
+                  console.log(`🔗 Found second OAuth trigger button: "${btnText?.trim()}"`);
+                  break;
+                }
+              }
+
+              // Also check links
+              if (!secondOauthButton) {
+                const links = await this.page.$$('a');
+                for (const link of links) {
+                  const linkText = await link.textContent();
+                  const textLower = (linkText || '').toLowerCase().trim();
+                  if (textLower === 'sign in' || textLower === 'login' || textLower === 'log in') {
+                    secondOauthButton = link;
+                    console.log(`🔗 Found second OAuth trigger link: "${linkText?.trim()}"`);
+                    break;
+                  }
+                }
+              }
+
+              if (secondOauthButton) {
+                console.log(`🔗 Clicking second OAuth button...`);
+                await secondOauthButton.click();
+
+                // Wait for navigation to actual OAuth provider
+                try {
+                  await this.page.waitForNavigation({ timeout: 10000, waitUntil: 'domcontentloaded' });
+                } catch {
+                  await this.page.waitForTimeout(3000);
+                }
+
+                const finalOauthUrl = this.page.url();
+                console.log(`🔗 Final redirect to: ${finalOauthUrl}`);
+
+                // Wait for page to load and re-check for credential fields
+                await this.page.waitForTimeout(1000);
+
+                usernameInputs = await this.page.$$('input[type="text"], input[type="email"]');
+                passwordInputs = await this.page.$$('input[type="password"]');
+
+                // Try Cognito-specific selectors
+                if (usernameInputs.length === 0) {
+                  const cognitoUsername = await this.page.$('input[name="username"], input[name="signInFormUsername"], #signInFormUsername');
+                  if (cognitoUsername) {
+                    usernameInputs = [cognitoUsername];
+                    console.log(`🔑 Found Cognito username field after second redirect`);
+                  }
+                }
+                if (passwordInputs.length === 0) {
+                  const cognitoPassword = await this.page.$('input[name="password"], input[name="signInFormPassword"], #signInFormPassword');
+                  if (cognitoPassword) {
+                    passwordInputs = [cognitoPassword];
+                    console.log(`🔑 Found Cognito password field after second redirect`);
+                  }
+                }
+
+                if (usernameInputs.length === 0) {
+                  console.log(`⚠️  Still no username field found after second redirect on ${finalOauthUrl}`);
+                  return null;
+                }
+              } else {
+                // Check for Cognito session continuation page ("Sign in as [email]" button)
+                const sessionContinueResult = await this.handleCognitoSessionContinuation(currentUrl);
+                if (sessionContinueResult === 'success') {
+                  return { success: true, newUrl: this.page.url() };
+                } else if (sessionContinueResult === 'not_found') {
+                  console.log(`⚠️  OAuth redirect occurred but no username field or second OAuth button found on ${oauthUrl}`);
+                  return null;
+                }
+                // If 'clicked', continue - we may need to handle credential fields after
+              }
+            } else {
+              // Check for Cognito session continuation page ("Sign in as [email]" button)
+              const sessionContinueResult = await this.handleCognitoSessionContinuation(currentUrl);
+              if (sessionContinueResult === 'success') {
+                return { success: true, newUrl: this.page.url() };
+              } else if (sessionContinueResult === 'not_found') {
+                console.log(`⚠️  OAuth redirect occurred but no username field found on ${oauthUrl}`);
+                return null;
+              }
+              // If 'clicked', continue - we may need to handle credential fields after
+            }
+          }
+
+          // Note: passwordInputs may be empty for multi-step flows (Cognito shows password after username)
+          if (passwordInputs.length === 0) {
+            console.log(`📝 Found username field but no password field - likely multi-step login flow`);
+          } else {
+            console.log(`✅ Found credential fields on OAuth page`);
+          }
+        } else {
+          console.log(`⚠️  Could not find username/password fields or OAuth button`);
+          return null;
+        }
       }
-      
-      if (!submitButton) {
-        console.log(`⚠️  Could not find submit button`);
-        return null;
+
+      // Fill in credentials - handle multi-step flows (like Cognito) or single-page flows
+      console.log(`📝 Filling credentials...`);
+
+      // Check if this is a multi-step flow (username only, no password visible yet)
+      const isMultiStepFlow = usernameInputs.length > 0 && passwordInputs.length === 0;
+
+      if (isMultiStepFlow) {
+        console.log(`🔄 Detected multi-step login flow (username first)`);
+
+        // Step 1: Fill username
+        await usernameInputs[0].fill(credentials.username);
+        await this.page.waitForTimeout(500);
+
+        // Find "Next" or "Continue" button for step 1
+        // Try generic selectors first (AI-friendly approach), then specific fallbacks
+        let nextButton: import('playwright').ElementHandle<Element> | null = await this.findButtonByText(['next', 'continue', 'submit', 'sign in']);
+        if (!nextButton) {
+          nextButton = await this.page.$('button[type="submit"], input[type="submit"]');
+        }
+        // Cognito-specific fallback only if generic selectors fail
+        if (!nextButton) {
+          nextButton = await this.page.$('input[name="signInSubmitButton"]');
+        }
+
+        if (nextButton) {
+          const btnText = await nextButton.textContent() || await nextButton.getAttribute('value') || 'unknown';
+          console.log(`🔘 Found submit button: "${btnText.trim()}"`);
+          console.log(`🔘 Clicking Next button...`);
+          await nextButton.click();
+
+          // Wait for password field to appear using waitForSelector (more reliable than fixed timeout)
+          console.log(`⏳ Waiting for password field to appear...`);
+          let passwordInput: import('playwright').ElementHandle<Element> | null = null;
+
+          try {
+            // Wait for any password field to appear
+            await this.page.waitForSelector(
+              'input[type="password"], input[name="password"], #signInFormPassword',
+              { timeout: 8000 }
+            );
+            console.log(`✅ Password field appeared`);
+          } catch {
+            console.log(`⚠️  Timeout waiting for password field`);
+            // Log current URL to help debug
+            console.log(`📍 Current URL after clicking Next: ${this.page.url()}`);
+            // Check for error messages
+            const errorEl = await this.page.$('.error, .alert-error, [role="alert"], .cognito-asf-error');
+            if (errorEl) {
+              const errorText = await errorEl.textContent();
+              console.log(`❌ Error message on page: ${errorText?.trim()}`);
+            }
+          }
+
+          // Look for password field with generic selectors first
+          passwordInput = await this.page.$('input[type="password"]');
+          if (!passwordInput) {
+            passwordInput = await this.page.$('input[name="password"]');
+          }
+          // Site-specific fallbacks only if generic selectors fail
+          if (!passwordInput) {
+            passwordInput = await this.page.$('#signInFormPassword, input[name="signInFormPassword"]');
+          }
+
+          if (passwordInput) {
+            console.log(`🔑 Found password field in step 2`);
+            await passwordInput.fill(credentials.password);
+            await this.page.waitForTimeout(500);
+
+            // Find submit button for step 2
+            let submitButton = await this.findButtonByText(['continue', 'sign in', 'login', 'log in', 'submit']);
+            if (!submitButton) {
+              submitButton = await this.page.$('button[type="submit"], input[type="submit"]');
+            }
+
+            if (submitButton) {
+              console.log(`🔘 Clicking submit button...`);
+              await submitButton.click();
+            } else {
+              console.log(`⚠️  Could not find submit button in step 2`);
+              return null;
+            }
+          } else {
+            console.log(`⚠️  Password field not found after clicking Next`);
+            // Take screenshot for debugging
+            console.log(`📍 Current URL: ${this.page.url()}`);
+            return null;
+          }
+        } else {
+          console.log(`⚠️  Could not find Next button for multi-step flow`);
+          return null;
+        }
+      } else {
+        // Single-page login flow - fill both fields together
+        console.log(`📝 Single-page login flow`);
+        await usernameInputs[0].fill(credentials.username);
+        await this.page.waitForTimeout(500);
+        await passwordInputs[0].fill(credentials.password);
+        await this.page.waitForTimeout(500);
+
+        // Find and click submit button
+        let submitButton = await this.findButtonByText(['sign in', 'login', 'log in', 'submit']);
+        if (!submitButton) {
+          submitButton = await this.page.$('button[type="submit"], input[type="submit"]');
+        }
+
+        if (!submitButton) {
+          const form = await this.page.$('form');
+          if (form) {
+            const formButtons = await form.$$('button');
+            if (formButtons.length > 0) {
+              submitButton = formButtons[0];
+            }
+          }
+        }
+
+        if (!submitButton) {
+          console.log(`⚠️  Could not find submit button`);
+          return null;
+        }
+
+        console.log(`🔘 Clicking submit button...`);
+        await submitButton.click();
       }
-      
-      await submitButton.click();
-      await this.page.waitForTimeout(3000);
-      
-      const newUrl = this.page.url();
+
+      // Wait for navigation back to app (OAuth callback)
+      try {
+        await this.page.waitForNavigation({ timeout: 15000, waitUntil: 'domcontentloaded' });
+      } catch {
+        // Navigation might have already happened
+        await this.page.waitForTimeout(3000);
+      }
+
+      let newUrl = this.page.url();
+      console.log(`📍 Post-login URL (initial): ${newUrl}`);
+
+      // CRITICAL: After OAuth callback, the app may do internal redirects (e.g., /?code=... -> /dashboard)
+      // We need to wait for these to complete to capture the final authenticated URL
+      // Wait for URL to stabilize (stop changing) with a max timeout
+      const maxWaitTime = 8000;  // 8 seconds max wait
+      const checkInterval = 500;
+      let waitedTime = 0;
+      let lastUrl = newUrl;
+
+      console.log(`⏳ Waiting for app internal redirects to complete...`);
+      while (waitedTime < maxWaitTime) {
+        await this.page.waitForTimeout(checkInterval);
+        waitedTime += checkInterval;
+        const currentUrl = this.page.url();
+
+        if (currentUrl !== lastUrl) {
+          console.log(`   🔄 URL changed: ${lastUrl} → ${currentUrl}`);
+          lastUrl = currentUrl;
+          // Reset wait timer when URL changes - give more time for next potential redirect
+          waitedTime = Math.max(0, waitedTime - 2000);
+        } else if (waitedTime >= 2000) {
+          // URL hasn't changed for 2 seconds, consider it stable
+          console.log(`   ✅ URL stable for ${checkInterval * 4}ms: ${currentUrl}`);
+          break;
+        }
+      }
+
+      newUrl = this.page.url();
+      console.log(`📍 Post-login URL (final): ${newUrl}`);
+
       if (newUrl !== currentUrl) {
         return { success: true, newUrl };
       }
@@ -980,7 +1535,14 @@ export class AutomationEngine {
         
         for (const button of allButtons) {
           const tagName = await button.evaluate((el) => el.tagName.toLowerCase());
-          
+          const text = await button.textContent();
+
+          // Check if this element should be excluded based on text
+          if (text && this.isElementExcluded(text)) {
+            console.log(`🚫 Skipping excluded element: ${text.trim().substring(0, 50)}`);
+            continue;
+          }
+
           // For links, check if they're same-domain
           if (tagName === 'a') {
             const href = await button.getAttribute('href');
@@ -1006,10 +1568,71 @@ export class AutomationEngine {
         }
         
         if (sameDomainButtons.length > 0) {
-          const selectedButton = sameDomainButtons[Math.floor(Math.random() * sameDomainButtons.length)];
+          // CRITICAL: Match the AI's suggested action to actual element text
+          // Extract what the AI wants to click from the action string
+          let targetText = '';
+
+          // Parse AI action: "Click Sign In", "Click the Sign In button", "Click on \"Sign In\"", etc.
+          const clickMatch = suggestion.action.match(/click\s+(?:the\s+)?(?:on\s+)?["']?([^"']+?)["']?(?:\s+button|\s+link)?$/i);
+          if (clickMatch) {
+            targetText = clickMatch[1].trim();
+          } else {
+            // Fallback: use the whole action minus common prefixes
+            targetText = suggestion.action.replace(/^(click|press|select|tap)\s+(the\s+)?(on\s+)?/i, '').trim();
+          }
+
+          console.log(`🎯 AI wants to click: "${targetText}"`);
+
+          // Find the best matching button
+          let selectedButton = null;
+          let bestMatchScore = 0;
+
+          for (const button of sameDomainButtons) {
+            const text = await button.textContent();
+            const btnText = (text || '').trim().toLowerCase();
+            const targetLower = targetText.toLowerCase();
+
+            // Exact match (highest priority)
+            if (btnText === targetLower) {
+              selectedButton = button;
+              bestMatchScore = 100;
+              console.log(`✅ Exact match found: "${text?.trim()}"`);
+              break;
+            }
+
+            // Contains match
+            if (btnText.includes(targetLower) || targetLower.includes(btnText)) {
+              const score = Math.min(btnText.length, targetLower.length) / Math.max(btnText.length, targetLower.length) * 80;
+              if (score > bestMatchScore) {
+                selectedButton = button;
+                bestMatchScore = score;
+                console.log(`🔍 Partial match: "${text?.trim()}" (score: ${score.toFixed(0)})`);
+              }
+            }
+
+            // Word overlap match
+            const targetWords = targetLower.split(/\s+/);
+            const btnWords = btnText.split(/\s+/);
+            const overlap = targetWords.filter(w => btnWords.includes(w)).length;
+            if (overlap > 0) {
+              const score = (overlap / Math.max(targetWords.length, btnWords.length)) * 60;
+              if (score > bestMatchScore) {
+                selectedButton = button;
+                bestMatchScore = score;
+                console.log(`🔍 Word overlap match: "${text?.trim()}" (score: ${score.toFixed(0)})`);
+              }
+            }
+          }
+
+          // If no good match found, don't click randomly - return null
+          if (!selectedButton || bestMatchScore < 30) {
+            console.log(`⚠️  No matching element found for "${targetText}" (best score: ${bestMatchScore.toFixed(0)})`);
+            return null;
+          }
+
           const text = await selectedButton.textContent();
           const tagName = await selectedButton.evaluate((el) => el.tagName.toLowerCase());
-          
+
           // Check if clicking will navigate away
           if (tagName === 'a') {
             const href = await selectedButton.getAttribute('href');
@@ -1034,9 +1657,10 @@ export class AutomationEngine {
               }
             }
           }
-          
+
+          console.log(`🖱️  Clicking: "${text?.trim()}"`);
           await selectedButton.click();
-          
+
           return {
             type: 'click',
             target: text || 'unknown',
@@ -1045,6 +1669,69 @@ export class AutomationEngine {
             success: true,
           };
         }
+      } else if (actionLower.includes('fill') && actionLower.includes('credentials')) {
+        // AI-driven credential filling: "Fill username field with credentials" or "Fill password field with credentials"
+
+        // CRITICAL: Don't fill credentials if we're already logged in!
+        // The AI sometimes confuses regular form fields (like "Project Name") with login fields
+        if (this.hasCompletedLogin) {
+          console.log(`⏭️  Skipping credential fill - already logged in (hasCompletedLogin=true)`);
+          return null;
+        }
+
+        const isPasswordField = actionLower.includes('password');
+        const isUsernameField = actionLower.includes('username') || actionLower.includes('email');
+
+        // Get credentials from context file
+        const currentUrl = this.page.url();
+        const credentials = await this.getCredentialsForLogin(currentUrl, { isLoginPage: true, credentialsVisible: false, shouldLogin: true });
+
+        if (!credentials.username || !credentials.password) {
+          console.log(`⚠️  No credentials available in context file for credential fill action`);
+          return null;
+        }
+
+        if (isPasswordField) {
+          // Find password field dynamically
+          const passwordField = await this.findInputFieldByType('password');
+          if (passwordField) {
+            console.log(`🔑 AI-driven: Filling password field with credentials`);
+            await passwordField.fill(credentials.password);
+            this.hasCompletedLogin = false; // Will be set to true after successful navigation
+            return {
+              type: 'type',
+              target: 'password field',
+              value: '********',
+              description: `Filled password field with credentials`,
+              timestamp,
+              success: true,
+            };
+          } else {
+            console.log(`⚠️  Could not find password field on page`);
+            return null;
+          }
+        } else if (isUsernameField) {
+          // Find username/email field dynamically
+          const usernameField = await this.findInputFieldByType('username');
+          if (usernameField) {
+            console.log(`🔑 AI-driven: Filling username field with credentials: ${credentials.username}`);
+            await usernameField.fill(credentials.username);
+            return {
+              type: 'type',
+              target: 'username field',
+              value: credentials.username,
+              description: `Filled username field with credentials`,
+              timestamp,
+              success: true,
+            };
+          } else {
+            console.log(`⚠️  Could not find username field on page`);
+            return null;
+          }
+        } else {
+          console.log(`⚠️  Credential fill action but couldn't determine field type: ${suggestion.action}`);
+          return null;
+        }
       } else if (actionLower.includes('type') || actionLower.includes('input') || actionLower.includes('form')) {
         // Find input fields
         const inputs = await this.page.$$('input[type="text"], input[type="email"], textarea');
@@ -1052,9 +1739,9 @@ export class AutomationEngine {
           const input = inputs[0];
           const placeholder = await input.getAttribute('placeholder') || 'field';
           const testValue = this.generateTestValue(placeholder);
-          
+
           await input.fill(testValue);
-          
+
           return {
             type: 'type',
             target: placeholder,
@@ -1125,317 +1812,6 @@ export class AutomationEngine {
     }
   }
 
-  /**
-   * Detect if current page is a login page and attempt login if credentials are available
-   * Returns login result with new URL if successful
-   */
-  private async attemptLoginIfNeeded(currentUrl: string): Promise<{ success: boolean; newUrl?: string } | null> {
-    if (!this.page) return null;
-
-    try {
-      // Check if this looks like a login page - multiple strategies
-      let hasLoginForm = false;
-      
-      // Strategy 1: Check for form with password field
-      try {
-        hasLoginForm = await this.page.$eval('form', (form) => {
-          const inputs = form.querySelectorAll('input[type="password"]');
-          return inputs.length > 0;
-        });
-      } catch {
-        // Form might not exist or selector failed
-      }
-      
-      // Strategy 2: Check for password input anywhere on page (some sites don't use <form>)
-      if (!hasLoginForm) {
-        try {
-          const passwordInputs = await this.page.$$('input[type="password"]');
-          hasLoginForm = passwordInputs.length > 0;
-        } catch {
-          // Ignore
-        }
-      }
-      
-      // Strategy 3: Check page content for login indicators
-      if (!hasLoginForm) {
-        try {
-          const bodyText = await this.page.textContent('body');
-          if (bodyText) {
-            const loginIndicators = ['login', 'sign in', 'signin', 'log in', 'password', 'username'];
-            const hasLoginText = loginIndicators.some(indicator => 
-              bodyText.toLowerCase().includes(indicator)
-            );
-            const hasPasswordField = await this.page.$('input[type="password"]').catch(() => null);
-            hasLoginForm = hasLoginText && hasPasswordField !== null;
-          }
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (!hasLoginForm) {
-        console.log(`   ℹ️  No login form detected on ${currentUrl}`);
-        return null; // Not a login page
-      }
-
-      console.log(`🔐 Login form detected on ${currentUrl}`);
-      
-      // Extract credentials (from page first, then context file)
-      const credentials = await this.extractCredentials(currentUrl);
-      
-      console.log(`   📋 Credential extraction result: username=${credentials.username ? '✓' : '✗'}, password=${credentials.password ? '✓' : '✗'}`);
-      
-      if (!credentials.username || !credentials.password) {
-        console.log(`⚠️  No credentials found for login (checked page and context file)`);
-        console.log(`   💡 Tip: Add credentials to context/{domain}.json or ensure they're visible on the page`);
-        return null;
-      }
-
-      console.log(`🔑 Attempting login with username: "${credentials.username}"`);
-
-      // Find username/email field
-      const usernameInputs = await this.page.$$('input[type="text"], input[type="email"]');
-      const passwordInputs = await this.page.$$('input[type="password"]');
-      
-      if (usernameInputs.length === 0 || passwordInputs.length === 0) {
-        console.log(`⚠️  Could not find username/password fields`);
-        return null;
-      }
-
-      // Fill in credentials
-      await usernameInputs[0].fill(credentials.username);
-      await this.page.waitForTimeout(500);
-      await passwordInputs[0].fill(credentials.password);
-      await this.page.waitForTimeout(500);
-
-      // Find and click submit button
-      // First try explicit submit buttons
-      let submitButton = await this.page.$('button[type="submit"], input[type="submit"]');
-      
-      // If not found, try to find button by text (Sign In, Login, etc.)
-      if (!submitButton) {
-        const allButtons = await this.page.$$('button');
-        for (const btn of allButtons) {
-          const btnText = await btn.textContent();
-          const textLower = (btnText || '').toLowerCase();
-          if (textLower.includes('sign in') || textLower.includes('login') || textLower.includes('log in')) {
-            submitButton = btn;
-            break;
-          }
-        }
-      }
-      
-      // If still not found, try any button in the form
-      if (!submitButton) {
-        const form = await this.page.$('form');
-        if (form) {
-          const formButtons = await form.$$('button');
-          if (formButtons.length > 0) {
-            submitButton = formButtons[0];
-          }
-        }
-      }
-      
-      if (!submitButton) {
-        console.log(`⚠️  Could not find submit button`);
-        return null;
-      }
-      
-      await submitButton.click();
-
-      // Wait for navigation or content change
-      await this.page.waitForTimeout(3000);
-      
-      // Check if URL changed (login successful)
-      const newUrl = this.page.url();
-      if (newUrl !== currentUrl) {
-        console.log(`✅ Login successful! Navigated to: ${newUrl}`);
-        return { success: true, newUrl };
-      }
-
-      // Check if content changed (login might have succeeded without URL change)
-      const pageContent = await this.page.textContent('body');
-      const hasLoginFormAfter = await this.page.$('input[type="password"]').catch(() => null);
-      
-      if (!hasLoginFormAfter && pageContent && pageContent.length > 100) {
-        // Login form is gone and there's substantial content - likely successful
-        console.log(`✅ Login likely successful (form disappeared, content present)`);
-        return { success: true, newUrl: newUrl };
-      }
-
-      console.log(`⚠️  Login attempt completed but no clear success indicator`);
-      return { success: false };
-    } catch (error) {
-      console.error(`Error attempting login: ${error}`);
-      return { success: false };
-    }
-  }
-
-  /**
-   * Extract credentials from page content or context file
-   * Priority: page content > context file
-   */
-  private async extractCredentials(url: string): Promise<{ username?: string; password?: string }> {
-    const credentials: { username?: string; password?: string } = {};
-
-    // First, try to extract from page content
-    try {
-      const bodyText = await this.page!.textContent('body');
-      if (bodyText) {
-        console.log(`   🔍 Searching for credentials on page...`);
-        
-        // More flexible approach: look for credential patterns anywhere in the page
-        // Try multiple patterns to handle different formats
-        
-        // Pattern 1: "Username: value" or "User: value" or "Login: value"
-        const usernamePatterns = [
-          /(?:username|user\s*name|login|email)[\s:]*([^\s\n\r:]+)/i,
-          /(?:username|user\s*name|login|email)[\s:]*\s*([^\s\n\r]+)/i,
-        ];
-        
-        // Pattern 2: "Password: value" or "Pass: value"
-        const passwordPatterns = [
-          /(?:password|pass)[\s:]*([^\s\n\r:]+)/i,
-          /(?:password|pass)[\s:]*\s*([^\s\n\r]+)/i,
-        ];
-        
-        // Try to find credentials in sections with "demo", "test", "credential" keywords
-        const credentialSections = await this.page!.$$eval('body', (body) => {
-          const text = body.textContent || '';
-          const sections: string[] = [];
-          const keywords = ['demo', 'test', 'credential', 'login', 'sign in'];
-          const lines = text.split('\n');
-          
-          // Collect sections around keywords (wider context)
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].toLowerCase();
-            if (keywords.some(kw => line.includes(kw))) {
-              // Get more context (10 lines instead of 5)
-              sections.push(lines.slice(Math.max(0, i - 2), Math.min(i + 10, lines.length)).join('\n'));
-            }
-          }
-          
-          // Also return the full text as a fallback
-          if (sections.length === 0) {
-            sections.push(text);
-          }
-          
-          return sections;
-        });
-
-        // Try to extract from credential sections
-        for (const section of credentialSections) {
-          // Try multiple username patterns
-          if (!credentials.username) {
-            for (const pattern of usernamePatterns) {
-              const match = section.match(pattern);
-              if (match && match[1]) {
-                const username = match[1].trim();
-                // Validate: not too short, not too long, doesn't contain common separators that indicate it's part of a label
-                if (username.length >= 2 && username.length < 100 && !username.includes(':')) {
-                  credentials.username = username;
-                  console.log(`   🔑 Extracted username from page: "${username}"`);
-                  break;
-                }
-              }
-            }
-          }
-          
-          // Try multiple password patterns
-          if (!credentials.password) {
-            for (const pattern of passwordPatterns) {
-              const match = section.match(pattern);
-              if (match && match[1]) {
-                const password = match[1].trim();
-                // Validate: not too short, not too long
-                if (password.length >= 2 && password.length < 100 && !password.includes(':')) {
-                  credentials.password = password;
-                  console.log(`   🔑 Extracted password from page: "${password}"`);
-                  break;
-                }
-              }
-            }
-          }
-        }
-        
-        // Alternative: Look for credentials in a structured format (e.g., "Username\nvalue\nPassword\nvalue")
-        if (!credentials.username || !credentials.password) {
-          const lines = bodyText.split('\n');
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            const lineLower = line.toLowerCase();
-            
-            // Check if this line indicates a username field
-            if ((lineLower.includes('username') || lineLower.includes('user') || lineLower.includes('login') || lineLower.includes('email')) && 
-                !lineLower.includes('password') && i + 1 < lines.length) {
-              const nextLine = lines[i + 1].trim();
-              if (nextLine.length >= 2 && nextLine.length < 100 && !nextLine.includes(':') && !credentials.username) {
-                credentials.username = nextLine;
-                console.log(`   🔑 Extracted username from structured format: "${nextLine}"`);
-              }
-            }
-            
-            // Check if this line indicates a password field
-            if (lineLower.includes('password') && i + 1 < lines.length) {
-              const nextLine = lines[i + 1].trim();
-              if (nextLine.length >= 2 && nextLine.length < 100 && !nextLine.includes(':') && !credentials.password) {
-                credentials.password = nextLine;
-                console.log(`   🔑 Extracted password from structured format: "${nextLine}"`);
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.log(`   ⚠️  Could not extract credentials from page: ${error}`);
-    }
-
-    // If credentials not found on page, check context file
-    if (!credentials.username || !credentials.password) {
-      try {
-        const urlObj = new URL(url);
-        let domain = urlObj.hostname;
-        if (domain.startsWith('www.')) {
-          domain = domain.substring(4);
-        }
-        
-        const contextPath = join(process.cwd(), 'context', `${domain}.json`);
-        if (existsSync(contextPath)) {
-          const contextContent = await readFile(contextPath, 'utf-8');
-          const contextFile = JSON.parse(contextContent);
-          
-          // Check for credentials in context file (could be in various formats)
-          if (contextFile.credentials) {
-            if (contextFile.credentials.username && !credentials.username) {
-              credentials.username = contextFile.credentials.username;
-              console.log(`   🔑 Using username from context file: "${credentials.username}"`);
-            }
-            if (contextFile.credentials.password && !credentials.password) {
-              credentials.password = contextFile.credentials.password;
-              console.log(`   🔑 Using password from context file`);
-            }
-          }
-          // Also check for demo/test credentials
-          if (contextFile.demoCredentials) {
-            if (contextFile.demoCredentials.username && !credentials.username) {
-              credentials.username = contextFile.demoCredentials.username;
-              console.log(`   🔑 Using demo username from context file: "${credentials.username}"`);
-            }
-            if (contextFile.demoCredentials.password && !credentials.password) {
-              credentials.password = contextFile.demoCredentials.password;
-              console.log(`   🔑 Using demo password from context file`);
-            }
-          }
-        }
-      } catch (error) {
-        // Context file is optional, ignore errors
-        console.log(`   ⚠️  Could not load context file: ${error}`);
-      }
-    }
-
-    return credentials;
-  }
-
   private generateTestValue(fieldName: string): string {
     const lower = fieldName.toLowerCase();
     
@@ -1469,6 +1845,119 @@ export class AutomationEngine {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Check if a domain is allowed (either the start domain or in allowedDomains list)
+   */
+  private isDomainAllowed(url: string): boolean {
+    try {
+      const urlDomain = new URL(url).hostname.replace(/^www\./, '');
+      const normalizedStartDomain = this.startDomain.replace(/^www\./, '');
+
+      // Check if it's the start domain
+      if (urlDomain === normalizedStartDomain) {
+        return true;
+      }
+
+      // Check if it's in the allowed domains list (supports partial matching for subdomains)
+      for (const allowed of this.allowedDomains) {
+        const normalizedAllowed = allowed.replace(/^www\./, '');
+        // Check exact match or subdomain match (e.g., "amazoncognito.com" matches "us-east-1xxx.auth.us-east-1.amazoncognito.com")
+        if (urlDomain === normalizedAllowed || urlDomain.endsWith('.' + normalizedAllowed)) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Load allowed domains from context file for the given URL
+   */
+  private async loadAllowedDomains(url: string): Promise<void> {
+    this.allowedDomains = [];
+
+    try {
+      const urlObj = new URL(url);
+      let domain = urlObj.hostname;
+      if (domain.startsWith('www.')) {
+        domain = domain.substring(4);
+      }
+      const port = urlObj.port;
+
+      console.log(`📂 [loadAllowedDomains] Looking for context file for ${domain}${port ? `:${port}` : ''}`);
+
+      // Try port-specific context first (e.g., localhost-4002.json)
+      let contextPath = port
+        ? join(process.cwd(), 'context', `${domain}-${port}.json`)
+        : join(process.cwd(), 'context', `${domain}.json`);
+
+      console.log(`📂 [loadAllowedDomains] Trying: ${contextPath}`);
+
+      // If port-specific doesn't exist, try domain-only
+      if (port && !existsSync(contextPath)) {
+        console.log(`📂 [loadAllowedDomains] Port-specific not found, trying domain-only`);
+        contextPath = join(process.cwd(), 'context', `${domain}.json`);
+      }
+
+      if (existsSync(contextPath)) {
+        console.log(`✅ [loadAllowedDomains] Found context file: ${contextPath}`);
+        const contextContent = await readFile(contextPath, 'utf-8');
+        const contextFile = JSON.parse(contextContent);
+
+        if (contextFile.allowedDomains && Array.isArray(contextFile.allowedDomains)) {
+          this.allowedDomains = contextFile.allowedDomains;
+          console.log(`🌐 Loaded allowed domains from context: ${this.allowedDomains.join(', ')}`);
+        } else {
+          console.log(`ℹ️  [loadAllowedDomains] No allowedDomains array in context file`);
+        }
+
+        // Also load excludeElements
+        if (contextFile.excludeElements && Array.isArray(contextFile.excludeElements)) {
+          this.excludeElements = contextFile.excludeElements;
+          console.log(`🚫 Loaded excluded elements from context: ${this.excludeElements.join(', ')}`);
+        }
+
+        // Load site context for AI vision (siteDescription, importantTests, login instructions)
+        if (contextFile.siteDescription) {
+          this.siteContext.siteDescription = contextFile.siteDescription;
+          console.log(`📝 Loaded site description for AI context`);
+        }
+        if (contextFile.importantTests && Array.isArray(contextFile.importantTests)) {
+          this.siteContext.importantTests = contextFile.importantTests;
+          console.log(`📋 Loaded ${contextFile.importantTests.length} important tests for AI context`);
+          // Extract login instructions from importantTests if present
+          const loginTest = contextFile.importantTests.find((t: any) =>
+            t.name?.toLowerCase().includes('login') || t.description?.toLowerCase().includes('login')
+          );
+          if (loginTest?.description) {
+            this.siteContext.loginInstructions = loginTest.description;
+            console.log(`🔑 Extracted login instructions from importantTests`);
+          }
+        }
+      } else {
+        console.log(`⚠️  [loadAllowedDomains] Context file not found: ${contextPath}`);
+      }
+    } catch (error) {
+      console.error(`⚠️  Error loading allowed domains: ${error}`);
+    }
+  }
+
+  /**
+   * Check if an element text should be excluded from interaction
+   */
+  private isElementExcluded(elementText: string): boolean {
+    if (!elementText || this.excludeElements.length === 0) {
+      return false;
+    }
+    const lowerText = elementText.toLowerCase();
+    return this.excludeElements.some(pattern =>
+      lowerText.includes(pattern.toLowerCase())
+    );
   }
 
 

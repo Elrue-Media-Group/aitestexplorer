@@ -87,76 +87,113 @@ export class AIVisionService {
     }
   }
 
-  async analyzePage(screenshotPath: string, url: string, previousActions: string[]): Promise<VisionAnalysis> {
+  async analyzePage(
+    screenshotPath: string,
+    url: string,
+    previousActions: string[],
+    siteContext?: { siteDescription?: string; loginInstructions?: string }
+  ): Promise<VisionAnalysis> {
     const imageBuffer = readFileSync(screenshotPath);
     const base64Image = imageBuffer.toString('base64');
 
-    const contextPrompt = previousActions.length > 0 
+    const contextPrompt = previousActions.length > 0
       ? `Previous actions taken: ${previousActions.join(', ')}. `
       : '';
 
-    const prompt = `${contextPrompt}You are an expert exploratory tester. Your goal is to understand the ENTIRE application, not just individual pages. Think like a tester who needs to map out the full user journey and discover all functionality.
+    // Build site context section if available
+    let siteContextPrompt = '';
+    if (siteContext?.siteDescription || siteContext?.loginInstructions) {
+      siteContextPrompt = `\n\n**SITE CONTEXT (from configuration):**\n`;
+      if (siteContext.siteDescription) {
+        siteContextPrompt += `Site Description: ${siteContext.siteDescription}\n`;
+      }
+      if (siteContext.loginInstructions) {
+        siteContextPrompt += `Login Instructions: ${siteContext.loginInstructions}\n`;
+      }
+      siteContextPrompt += `\nUse this context to understand the site and perform the appropriate actions. Follow the login instructions exactly when you encounter a login page or authentication flow.\n\n`;
+    }
 
-Analyze this webpage screenshot and provide:
+    const prompt = `${contextPrompt}${siteContextPrompt}You are an autonomous exploratory QA agent. Your PRIMARY MISSION is to explore and test the full authenticated product experience.
 
-1. A detailed description of what you see on the page
-2. All interactive elements (buttons, links, forms, inputs, etc.) with their FUNCTIONAL UNDERSTANDING:
-   For EACH interactive element, provide:
-   - Element type (button, link, input, form, etc.)
-   - Text/label visible on the element
-   - Location/context (e.g., "Name Display Demo section", "login form", "top navigation")
-   - Purpose (what it's meant to do, e.g., "updates the name display", "submits login credentials")
-   - Behavior (how it works functionally, e.g., "takes input text and displays it back", "navigates to home page")
-   - Workflow (how it fits into user flow, e.g., "User enters text → Clicks Update Name → Display panel updates")
-   - Related elements (what it interacts with, e.g., ["name input field", "name display panel"])
-   - Expected outcome (what should happen when used, e.g., "Display panel updates with entered name")
-   
-   Format each element as:
-   ELEMENT: [Type] "[Text/Label]"
-   Location: [context/section]
-   Purpose: [what it does]
-   Behavior: [how it works]
-   Workflow: [user flow]
-   Related: [related elements]
-   Expected: [expected outcome]
-3. EXPLORATORY TESTING MINDSET - Suggested next actions (CRITICAL):
-   - Think about what comes NEXT in the user journey, not just what's on this page
-   - If this is a login page, the REAL value is exploring what's BEHIND the login - what pages, features, and workflows exist after authentication
-   - Prioritize actions that unlock more of the application (e.g., "Complete login to explore authenticated area" should be HIGHEST priority)
-   - After login, suggest exploring ALL links, buttons, and navigation elements you see
-   - Think about the full workflow: "What would a user do next? What features are available? What should I test?"
-   - If you see demo/test credentials, understand this is likely a demo site - explore it thoroughly to understand all available controls and features
-4. The type of page (homepage, login, product listing, form, dashboard, etc.)
-5. Any potential risks or issues you notice
-6. Architectural information about the site structure, navigation patterns, forms, and technology indicators
-7. Site characteristics analysis:
-   - What is the primary purpose of this website? (e.g., news aggregation, e-commerce, blog, social media, documentation, etc.)
-   - What is the nature of the content? (static/rarely changes, dynamic/frequently updates, mixed)
-   - What patterns do you observe? (feed-based content, product listings, time-sensitive elements, rotating content, etc.)
-   - Are there indicators of update frequency? (timestamps, "new" badges, real-time updates, etc.)
-8. LOGIN PAGE DETECTION (CRITICAL - EXPLORATORY FOCUS):
-   - Is this a login page? Look for password fields, username/email inputs, "Sign In" buttons, login forms
-   - If it's a login page, are there any credentials visible on the page? (e.g., "Demo Credentials: Username: test, Password: password")
-   - CREDENTIAL EXTRACTION FORMAT (IMPORTANT): If credentials are visible, provide them in this exact format on a separate line:
-     LOGIN_CREDENTIALS: Username: test Password: password
-     - Extract the ACTUAL values only (no quotes, no extra text)
-     - If page shows "Username: test", extract just: Username: test
-     - If page shows "Username: 'test'", extract just: Username: test (remove quotes)
-     - The values should be ready to use directly in a login form
-   - EXPLORATORY TESTING PERSPECTIVE: After login, what should be explored?
-     * The REAL value is discovering what pages, features, and workflows exist AFTER login
-     * Suggest exploring ALL navigation links, buttons, and interactive elements on the post-login page
-     * Think about what a user would do: "What features are available? What should I test?"
-     * If this appears to be a demo/test site, explore it thoroughly to understand all available controls
-   - If this is a login page, suggest "Complete login form" as HIGHEST priority action, followed by "Explore all links and buttons on post-login page"
+**CURRENT URL:** ${url}
 
-9. POST-LOGIN EXPLORATION STRATEGY (if this is a post-login page):
-   - What pages/features are accessible from here? List ALL navigation links, buttons, and interactive elements
-   - What workflows can be tested? (e.g., "Create item", "Filter list", "View details", etc.)
-   - What should be explored next? Prioritize actions that reveal more of the application
-   - Think about the full user journey: "What would a real user do? What features should I test?"
+=== GLOBAL PRIORITY ===
+1. Reach and explore the CORE PRODUCT (authenticated areas) as quickly as possible
+2. Only spend minimal effort on "gateway" pages (login, signup) - they are gates, not destinations
+3. Always maintain FORWARD PROGRESS: if you can proceed deeper into the app, do it
 
-Be specific and actionable. Think like an exploratory tester mapping out the entire application. If this is a login page, understand that login is a GATEWAY to more content - the real testing happens after authentication. Suggest actions that unlock and explore the full application, not just test the login page itself.`;
+=== RECOGNIZING POST-LOGIN STATE ===
+After successful login, you are now in the AUTHENTICATED CORE APPLICATION. Recognize this state if:
+- You see a user menu, profile icon, or "Sign Out"/"Logout" button
+- You see dashboard content, account info, or personalized data
+- URL changed from /login or auth provider back to the main app
+- Navigation shows app-specific sections (Dashboard, Settings, Profile, etc.)
+- Previous context mentions "completed login" or "POST-LOGIN"
+
+WHEN YOU ARE IN AUTHENTICATED STATE:
+1. Your mission is NOW to explore all features of the authenticated app
+2. Look for and click on: Dashboard links, navigation menu items, settings, data views, action buttons
+3. Generate SPECIFIC actions to click on actual visible links and buttons - not generic "explore"
+4. DO NOT suggest going back to login or marketing pages
+5. Prioritize buttons and links that lead to app functionality (views, forms, data, actions)
+
+=== AUTHENTICATION GATE RULE ===
+Many pages require authentication. If this page appears to be a login/auth gateway, treat it as a GATE to pass through, not a destination to deeply test.
+
+Recognize a login/auth gateway if ANY of these are true:
+- URL contains: /login, /signin, /auth, /sso
+- Visible UI includes: "Sign in", "Log in", "Welcome back", password fields, email/username inputs
+- Primary CTA implies identity verification or redirect to identity provider (AWS Cognito, Auth0, etc.)
+- Page says "Click to sign in" or similar redirect-to-auth language
+
+WHEN YOU DETECT A LOGIN/AUTH GATE:
+1. Quick sanity check only (CTA exists, page not broken)
+2. Immediately attempt to pass the gate:
+   - If you see a "Sign In" button but NO form fields: Click it to reach the actual login form
+   - If you see a username/email field: Fill it with credentials, then click Next/Continue/Submit
+   - If you see a password field: Fill it with credentials, then click Sign In/Submit
+3. After each action, I will show you the next page - keep progressing through the auth flow
+4. Once logged in (URL changes, user menu appears, protected content visible): resume full exploration
+
+=== RESPONSE FORMAT ===
+
+Provide your analysis in these sections:
+
+**1. PAGE CLASSIFICATION**
+Type: [Auth Gate | Public Marketing | App Core | Settings | Error | Unknown]
+Purpose: [One sentence describing what this page is for]
+
+**2. PAGE DESCRIPTION**
+[2-4 sentences describing what you see on the page - layout, content, key elements]
+
+**3. INTERACTIVE ELEMENTS**
+List each clickable/fillable element:
+ELEMENT: [type] "[visible text]" - [what it does]
+
+Examples:
+ELEMENT: button "Sign In" - redirects to authentication provider
+ELEMENT: input "Email" - text field for email/username
+ELEMENT: link "Dashboard" - navigates to main dashboard
+
+**4. NEXT ACTIONS**
+List 1-3 actions. STRICT FORMAT REQUIRED - each action MUST start with "ACTION:" on its own line:
+
+ACTION: Click "Sign In"
+ACTION: Fill username field with credentials
+ACTION: Fill password field with credentials
+
+VALID ACTION FORMATS (use these EXACTLY):
+- ACTION: Click "Exact Button Text"
+- ACTION: Fill username field with credentials
+- ACTION: Fill password field with credentials
+
+DO NOT write prose, explanations, goals, or bullet points. ONLY write ACTION: lines.
+DO NOT write "- Goal:" or "### Priority" or any other text.
+WRONG: "- Click the sign in button to proceed"
+RIGHT: ACTION: Click "Sign In"
+
+**5. BRIEF NOTES** (optional, 1-2 sentences max)
+[Any critical bugs or blockers only]`;
 
     try {
       const response = await this.client.chat.completions.create({
@@ -266,11 +303,46 @@ Be specific and actionable. Think like an exploratory tester mapping out the ent
       console.log(`✅ Detected login page from password field mention`);
     }
 
+    // FIRST PASS: Extract ACTION: lines directly (new format)
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      // Match "ACTION: Click "Button Text"" or "ACTION: Fill username field with credentials"
+      if (trimmedLine.toUpperCase().startsWith('ACTION:')) {
+        const actionText = trimmedLine.substring(7).trim(); // Remove "ACTION:" prefix
+        if (actionText.length > 0) {
+          // Filter out section headers that accidentally start with "ACTION:" pattern
+          // e.g., "**5. BRIEF NOTES**" sometimes gets parsed as an action
+          const lowerAction = actionText.toLowerCase();
+          if (lowerAction.includes('brief notes') ||
+              lowerAction.includes('notes**') ||
+              lowerAction.startsWith('**') ||
+              /^\*?\*?\d+\./.test(actionText)) {  // Matches "**5." or "*5." or "5."
+            console.log(`⏭️  Skipping non-action line: ${actionText}`);
+            continue;
+          }
+
+          // Determine priority based on action type
+          let priority: SuggestedAction['priority'] = 'high';
+          if (lowerAction.includes('fill') && lowerAction.includes('credentials')) {
+            priority = 'high'; // Credential actions are high priority
+          } else if (lowerAction.includes('click')) {
+            priority = 'high'; // Click actions are high priority
+          }
+          suggestedActions.push({
+            action: actionText,
+            reason: 'AI suggested action',
+            priority,
+          });
+          console.log(`📌 Parsed ACTION: ${actionText}`);
+        }
+      }
+    }
+
     let currentSection = '';
     for (const line of lines) {
       const lowerLine = line.toLowerCase().trim();
-      
-      if (lowerLine.includes('description') || lowerLine.includes('page shows')) {
+
+      if (lowerLine.includes('description') || lowerLine.includes('page shows') || lowerLine.includes('page description')) {
         currentSection = 'description';
         description += line + ' ';
       } else if (lowerLine.includes('interactive') || lowerLine.includes('element') || lowerLine.startsWith('element:')) {
@@ -280,8 +352,25 @@ Be specific and actionable. Think like an exploratory tester mapping out the ent
           const element = this.extractElement(line, lines, lines.indexOf(line));
           if (element) interactiveElements.push(element);
         }
-      } else if (lowerLine.includes('suggest') || lowerLine.includes('action')) {
+      } else if (lowerLine.includes('next actions') || lowerLine.includes('suggested actions')) {
         currentSection = 'actions';
+      } else if (lowerLine.includes('page classification') || lowerLine.startsWith('type:')) {
+        currentSection = 'pageType';
+        // Parse new format: "Type: Auth Gate" or "Type: [Auth Gate | App Core | ...]"
+        const typeMatch = line.match(/type[:\s]+\[?([^\]\n,|]+)/i);
+        if (typeMatch) {
+          const parsedType = typeMatch[1].trim().toLowerCase();
+          if (parsedType.includes('auth') || parsedType.includes('gate') || parsedType.includes('login')) {
+            pageType = 'login';
+            loginInfo.isLoginPage = true;
+            loginInfo.shouldLogin = true;
+            console.log(`✅ Detected Auth Gate page type from classification`);
+          } else if (parsedType.includes('app core') || parsedType.includes('dashboard')) {
+            pageType = 'dashboard';
+          } else {
+            pageType = parsedType;
+          }
+        }
       } else if (lowerLine.includes('type') || lowerLine.includes('page type')) {
         currentSection = 'pageType';
         const match = line.match(/type[:\s]+([^,\n]+)/i);
@@ -424,98 +513,13 @@ Be specific and actionable. Think like an exploratory tester mapping out the ent
       loginInfo.credentialsVisible = true;
     }
     
-    // Enhanced credential extraction from full content - prioritize structured format
-    // Do this even if loginInfo.isLoginPage is false initially - we'll set it if we find credentials
-    if (loginInfo.isLoginPage || fullContentLower.includes('credential') || fullContentLower.includes('demo')) {
-      console.log(`🔍 Searching for credentials in AI response...`);
-      
-      // First, look for the structured LOGIN_CREDENTIALS format
-      const structuredMatch = content.match(/LOGIN_CREDENTIALS[:\s]+Username[:\s]+([^\s\n]+)[\s]+Password[:\s]+([^\s\n]+)/i);
-      if (structuredMatch) {
-        console.log(`✅ Found structured LOGIN_CREDENTIALS format`);
-        if (!loginInfo.username) {
-          loginInfo.username = structuredMatch[1].trim().replace(/^["']+|["']+$/g, '');
-        }
-        if (!loginInfo.password) {
-          loginInfo.password = structuredMatch[2].trim().replace(/^["']+|["']+$/g, '');
-        }
-        loginInfo.credentialsVisible = true;
-        loginInfo.isLoginPage = true; // If credentials found, it's definitely a login page
-      }
-      
-      // Pattern 1: "Demo credentials (username: test, password: password)" - handles parentheses
-      if (!loginInfo.username || !loginInfo.password) {
-        const demoCredsMatch = content.match(/demo\s+credentials?\s*[\(:]?\s*(?:username|user)[\s:]+([^\s,)]+)[\s,)]+password[\s:]+([^\s,)]+)/i);
-        if (demoCredsMatch) {
-          console.log(`✅ Found demo credentials in parentheses format`);
-          if (!loginInfo.username) {
-            loginInfo.username = demoCredsMatch[1].trim().replace(/^["']+|["']+$/g, '');
-          }
-          if (!loginInfo.password) {
-            loginInfo.password = demoCredsMatch[2].trim().replace(/^["']+|["']+$/g, '');
-          }
-          loginInfo.credentialsVisible = true;
-          loginInfo.isLoginPage = true;
-        }
-      }
-      
-      // Pattern 2: "username: test, password: password" (comma-separated)
-      if (!loginInfo.username || !loginInfo.password) {
-        const commaSeparatedMatch = content.match(/(?:username|user\s*name)[\s:]+([^\s,]+)[\s,]+password[\s:]+([^\s,]+)/i);
-        if (commaSeparatedMatch) {
-          console.log(`✅ Found credentials in comma-separated format`);
-          if (!loginInfo.username) {
-            loginInfo.username = commaSeparatedMatch[1].trim().replace(/^["']+|["']+$/g, '');
-          }
-          if (!loginInfo.password) {
-            loginInfo.password = commaSeparatedMatch[2].trim().replace(/^["']+|["']+$/g, '');
-          }
-          loginInfo.credentialsVisible = true;
-          loginInfo.isLoginPage = true;
-        }
-      }
-      
-      // Pattern 3: Separate username and password lines/mentions
-      if (!loginInfo.username) {
-        const usernamePatterns = [
-          /(?:username|user\s*name|login)[\s:]+["']?([^"'\s,\n:\)]+)["']?/i,
-          /(?:username|user\s*name|login)[\s:]+([^\s,\n:\)]+)/i,
-          /username[\s:]+([a-zA-Z0-9_\-]+)/i, // Simple: "username: test"
-        ];
-        for (const pattern of usernamePatterns) {
-          const match = content.match(pattern);
-          if (match && match[1] && match[1].length > 1 && match[1].length < 100 && !match[1].includes('field')) {
-            loginInfo.username = match[1].trim().replace(/^["']+|["']+$/g, '');
-            console.log(`✅ Extracted username: "${loginInfo.username}"`);
-            break;
-          }
-        }
-      }
-      
-      if (!loginInfo.password) {
-        const passwordPatterns = [
-          /password[\s:]+["']?([^"'\s,\n:\)]+)["']?/i,
-          /password[\s:]+([^\s,\n:\)]+)/i,
-          /password[\s:]+([a-zA-Z0-9_\-]+)/i, // Simple: "password: password"
-        ];
-        for (const pattern of passwordPatterns) {
-          const match = content.match(pattern);
-          if (match && match[1] && match[1].length > 1 && match[1].length < 100 && !match[1].includes('field')) {
-            loginInfo.password = match[1].trim().replace(/^["']+|["']+$/g, '');
-            console.log(`✅ Extracted password: "${loginInfo.password}"`);
-            break;
-          }
-        }
-      }
-      
-      // If we found credentials, mark as login page and visible
-      if (loginInfo.username && loginInfo.password) {
-        loginInfo.credentialsVisible = true;
-        loginInfo.isLoginPage = true;
-        loginInfo.shouldLogin = true; // If credentials are found, we should login
-        console.log(`✅ Login page detected with credentials: username="${loginInfo.username}", password="${loginInfo.password}"`);
-      }
-    }
+    // DISABLED: Credential extraction from AI response text
+    // This was extracting garbage from markdown formatting (e.g., "**UI**" becoming username="UI")
+    // Credentials should ONLY come from:
+    // 1. Context file (authoritative) - handled by automation-engine.ts extractCredentials()
+    // 2. Page content extraction (fallback) - also in automation-engine.ts
+    // The AI vision module should only detect if it's a login page, not extract credentials
+    console.log(`🔍 AI vision: credential extraction disabled (use context file instead)`);
 
     // Enhanced action extraction: Look for action-like patterns in the full content
     // This catches cases where AI formats actions differently (numbered lists, bullets, etc.)
