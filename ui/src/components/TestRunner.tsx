@@ -7,6 +7,7 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(10);
   const [maxActions, setMaxActions] = useState(50);
+  const [maxTestsToExecute, setMaxTestsToExecute] = useState(0);
   const [headless, setHeadless] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -29,6 +30,7 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
           url,
           maxPages,
           maxActions,
+          maxTestsToExecute,
           headless,
         }),
       });
@@ -106,6 +108,22 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
             />
             <small style={{ color: '#666', display: 'block', marginTop: '4px' }}>
               Maximum number of interactive actions to perform
+            </small>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="maxTestsToExecute">Max Tests to Execute</label>
+            <input
+              id="maxTestsToExecute"
+              type="number"
+              min="0"
+              max="500"
+              value={maxTestsToExecute}
+              onChange={(e) => setMaxTestsToExecute(parseInt(e.target.value) || 0)}
+              disabled={loading}
+            />
+            <small style={{ color: '#666', display: 'block', marginTop: '4px' }}>
+              0 = run all tests, N = run first N tests (sorted by priority)
             </small>
           </div>
         </div>

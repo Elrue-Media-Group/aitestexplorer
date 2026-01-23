@@ -25,6 +25,7 @@ export function loadConfig(): Config {
   return {
     maxPages: parseInt(process.env.MAX_PAGES || '10', 10),
     maxActions: parseInt(process.env.MAX_ACTIONS || '50', 10),
+    maxTestsToExecute: parseInt(process.env.MAX_TESTS_TO_EXECUTE || '0', 10), // 0 = all
     openaiApiKey: apiKey,
     openaiModel: process.env.OPENAI_MODEL || 'gpt-4o',
     screenshotDir: process.env.SCREENSHOT_DIR || './screenshots',

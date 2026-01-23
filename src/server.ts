@@ -49,19 +49,19 @@ app.get('/api/health', (req: express.Request, res: express.Response) => {
 // Run test analysis
 app.post('/api/run-test', async (req: express.Request, res: express.Response) => {
   try {
-    const { url, maxPages = 10, maxActions = 50, headless = false } = req.body;
-    
+    const { url, maxPages = 10, maxActions = 50, maxTestsToExecute = 0, headless = false } = req.body;
+
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
     }
 
     // Run test asynchronously
     const runId = `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-    
-    console.log(`[API] Starting test run: ${runId} for URL: ${url}`);
-    
+
+    console.log(`[API] Starting test run: ${runId} for URL: ${url} (maxTestsToExecute: ${maxTestsToExecute === 0 ? 'all' : maxTestsToExecute})`);
+
     // Start test run in background
-    runTestAnalysis(url, maxPages, maxActions, headless, runId)
+    runTestAnalysis(url, maxPages, maxActions, headless, runId, maxTestsToExecute)
       .then((result) => {
         console.log(`[API] Test run ${runId} completed:`, result);
       })

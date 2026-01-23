@@ -8,9 +8,24 @@
  * - Validation against actual page elements
  */
 
-import { PageState, TestCase } from './types.js';
+import { PageState, TestCase, ContextFileConfig } from './types.js';
 import { AIVisionService } from './ai-vision.js';
 import { Config } from './types.js';
+
+/**
+ * Site context passed to test generation
+ */
+export interface SiteContext {
+  architecture?: unknown;
+  risks?: unknown[];
+  fullReport?: string;
+  sitePurpose?: string;
+  contentNature?: 'static' | 'dynamic' | 'mixed';
+  contentPatterns?: string[];
+  testingGuidance?: string;
+  updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+  contextFile?: ContextFileConfig;
+}
 
 export interface GeneratedTestCase {
   id: string;
@@ -62,17 +77,7 @@ export class TestCaseGenerator {
   async generateTestCases(
     pages: PageState[],
     startUrl: string,
-    siteContext?: {
-      architecture?: any;
-      risks?: any[];
-      fullReport?: string;
-      sitePurpose?: string;
-      contentNature?: 'static' | 'dynamic' | 'mixed';
-      contentPatterns?: string[];
-      testingGuidance?: string;
-      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
-      contextFile?: any; // CRITICAL: Must be here to receive credentials!
-    }
+    siteContext?: SiteContext
   ): Promise<GeneratedTestCase[]> {
     // Extract information from exploration with discovered elements
     const pageInfo = pages.map(p => ({
@@ -98,7 +103,7 @@ export class TestCaseGenerator {
     const aiTestCases = await this.generateWithAI(pageInfo, startUrl, aggregatedSiteContext);
 
     // Verify that required test scenarios from context file are covered
-    const contextFile = (siteContext as any)?.contextFile;
+    const contextFile = siteContext?.contextFile;
     const importantTests = contextFile?.importantTests || contextFile?.customTestCases;
     if (importantTests && Array.isArray(importantTests) && importantTests.length > 0) {
       this.verifyTestCoverage(aiTestCases, importantTests);
@@ -115,39 +120,9 @@ export class TestCaseGenerator {
    */
   private aggregateSiteCharacteristics(
     pages: PageState[],
-    siteContext?: {
-      architecture?: any;
-      risks?: any[];
-      fullReport?: string;
-      sitePurpose?: string;
-      contentNature?: 'static' | 'dynamic' | 'mixed';
-      contentPatterns?: string[];
-      testingGuidance?: string;
-      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
-      contextFile?: any;
-    }
-  ): {
-    sitePurpose?: string;
-    contentNature?: 'static' | 'dynamic' | 'mixed';
-    contentPatterns?: string[];
-    testingGuidance?: string;
-    updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
-    architecture?: any;
-    risks?: any[];
-    fullReport?: string;
-    contextFile?: any;
-  } {
-    const characteristics: {
-      sitePurpose?: string;
-      contentNature?: 'static' | 'dynamic' | 'mixed';
-      contentPatterns?: string[];
-      testingGuidance?: string;
-      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
-      architecture?: any;
-      risks?: any[];
-      fullReport?: string;
-      contextFile?: any;
-    } = {};
+    siteContext?: SiteContext
+  ): SiteContext {
+    const characteristics: SiteContext = {};
 
     // Collect from vision analyses
     const allCharacteristics = pages
@@ -732,15 +707,46 @@ export class TestCaseGenerator {
     
     const prompt = `You are an expert exploratory tester with AI vision capabilities. You've analyzed screenshots of this website and understand its structure, purpose, and interactive elements.
 
-YOUR GOAL: Generate comprehensive test cases that thoroughly test all discovered functionality.
+YOUR GOAL: Generate test cases that verify actual application behavior, not just that pages load.
 
-GUIDELINES:
+=== CORE PRINCIPLES ===
 • Test only what you actually discovered (don't assume standard pages exist)
 • Use exact element text/labels from the discovery data
 • Create self-contained tests - if a page requires login, include login steps at the beginning
-• Use credentials you observed on the pages or from the context below
-• Focus on complete user workflows, not just isolated clicks
-• For targets: prefix with element type since you saw them via vision (e.g., "button:Sign In", "link:Home", "input:username")
+• Use credentials from the context below (never make up credentials)
+• For targets: prefix with element type (e.g., "button:Sign In", "link:Home", "input:username")
+
+=== TEST DEPTH GUIDANCE ===
+Think like a real tester. For each feature you discovered, consider:
+
+**Forms you discovered:**
+- What happens when submitted with valid data? Does a success message appear? Does the item show up in a list?
+- What happens with empty required fields? Is there validation feedback?
+- What happens with invalid data (wrong format, too long, special characters)?
+
+**Create/Add actions you discovered (buttons like "New", "Add", "Create"):**
+- After creating something, does it appear in the expected location (list, table, dashboard)?
+- Can you verify the created item has the correct data?
+
+**Lists, tables, or data displays you discovered:**
+- Do filters actually change what's shown?
+- Does sorting work as expected?
+- Can you interact with individual items?
+
+**Navigation you discovered:**
+- Does clicking a link take you to the expected page?
+- Does the page show relevant content for that section?
+
+=== VERIFICATION IS KEY ===
+Every test should have meaningful verification steps that check ACTUAL STATE CHANGES:
+- BAD: {"action": "verify", "description": "verify page loads"}
+- GOOD: {"action": "verify", "description": "verify 'Project created successfully' message appears"}
+- GOOD: {"action": "verify", "description": "verify new project 'Test Project' appears in projects list"}
+
+=== PRIORITY GUIDANCE ===
+- HIGH: Core user workflows, authentication, data creation/modification
+- MEDIUM: Secondary features, filters, sorting, navigation
+- LOW: Edge cases, error states, less common paths
 
 ${siteContextSection}
 
@@ -752,19 +758,19 @@ Return valid JSON only (no markdown, no explanations):
     "name": "descriptive test name",
     "description": "what this verifies",
     "priority": "high|medium|low",
-    "category": "navigation|forms|functionality|content|etc",
+    "category": "navigation|forms|functionality|validation|workflow|etc",
     "steps": [
       {"action": "navigate", "description": "navigate to page", "target": "http://example.com/page"},
       {"action": "type", "description": "enter text", "target": "input:Username", "value": "text to type"},
       {"action": "click", "description": "click element", "target": "button:Submit"},
-      {"action": "verify", "description": "verify state", "target": "element text to verify"}
+      {"action": "verify", "description": "verify specific state change", "target": "expected element or text"}
     ],
-    "expectedResult": "success criteria",
+    "expectedResult": "specific success criteria describing the expected state",
     "pageUrl": "URL where primary element was found"
   }]
 }
 
-Generate comprehensive coverage - create test cases for all discovered interactive elements across all pages.`;
+Generate a balanced set of tests covering the discovered functionality. Include both happy path tests and validation/error tests where forms exist.`;
 
     try {
       // Use OpenAI client directly for text generation

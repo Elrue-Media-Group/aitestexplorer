@@ -1,6 +1,7 @@
 export interface Config {
   maxPages: number;
   maxActions: number;
+  maxTestsToExecute: number; // 0 = run all tests, N = run first N tests (sorted by priority)
   openaiApiKey: string;
   openaiModel: string;
   screenshotDir: string;
@@ -176,5 +177,145 @@ export interface Risk {
   severity: 'critical' | 'high' | 'medium' | 'low';
   page?: string;
   recommendation: string;
+}
+
+/**
+ * Credentials for authentication
+ */
+export interface ContextCredentials {
+  username?: string;
+  email?: string;
+  password: string;
+}
+
+/**
+ * Login selectors for authentication
+ */
+export interface LoginSelectors {
+  emailField?: string;
+  passwordField?: string;
+  submitButton?: string;
+}
+
+/**
+ * Authentication configuration
+ */
+export interface AuthenticationConfig {
+  required?: boolean;
+  type?: string; // e.g., 'cognito', 'auth0', 'basic'
+  credentials?: ContextCredentials;
+  loginPage?: string;
+  loginSelectors?: LoginSelectors;
+}
+
+/**
+ * Important test definition from context file
+ */
+export interface ImportantTest {
+  name: string;
+  description: string;
+  page?: string;
+  priority?: 'high' | 'medium' | 'low';
+}
+
+/**
+ * Key page definition
+ */
+export interface KeyPage {
+  path: string;
+  description?: string;
+  purpose?: string;
+}
+
+/**
+ * Testing guidance configuration
+ */
+export interface TestingGuidance {
+  testThese?: string[];
+  dontTestThese?: string[];
+  priority?: string;
+  specialNotes?: string[];
+}
+
+/**
+ * Filter behavior configuration
+ */
+export interface FilterBehavior {
+  contentTypeFilters?: Record<string, string>;
+  topicFilters?: string[];
+}
+
+/**
+ * Context file configuration schema
+ * This interface defines all valid fields for context/{domain}.json files
+ */
+export interface ContextFileConfig {
+  // Site identification
+  siteName?: string;
+  domain?: string;
+
+  // Site description (supports both field names for backward compatibility)
+  siteDescription?: string;
+  description?: string;
+
+  // Site purpose and nature
+  sitePurpose?: string;
+  primaryPurpose?: string;
+  contentNature?: 'static' | 'dynamic' | 'mixed';
+  contentPatterns?: string[];
+  updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
+  updateSchedule?: string | Record<string, string>;
+  technology?: string[];
+
+  // Domain and element control
+  allowedDomains?: string[];
+  excludeElements?: string[];
+
+  // Authentication
+  authentication?: AuthenticationConfig;
+  credentials?: ContextCredentials;
+  demoCredentials?: ContextCredentials;
+
+  // Test configuration
+  importantTests?: ImportantTest[];
+  customTestCases?: ImportantTest[]; // Alias for importantTests
+  keyPages?: (string | KeyPage)[];
+
+  // Testing guidance (supports both formats)
+  testingNotes?: string;
+  testingGuidance?: string | TestingGuidance;
+
+  // Filter configuration
+  filterBehavior?: FilterBehavior;
+
+  // Documentation (not used in code, for human reference)
+  _notes?: Record<string, string>;
+}
+
+/**
+ * AI Page Analysis Response (structured JSON format)
+ * Used for consistent AI response parsing
+ */
+export interface AIPageAnalysisResponse {
+  pageClassification: {
+    type: 'auth_gate' | 'public_marketing' | 'app_core' | 'settings' | 'error' | 'unknown';
+    purpose: string;
+  };
+  pageDescription: string;
+  interactiveElements: Array<{
+    type: 'button' | 'link' | 'input' | 'form' | 'dropdown' | 'checkbox' | 'radio';
+    text: string;
+    purpose: string;
+    location?: string;
+  }>;
+  suggestedActions: Array<{
+    action: string;
+    priority: 'high' | 'medium' | 'low';
+  }>;
+  loginInfo?: {
+    isLoginPage: boolean;
+    hasCredentialFields: boolean;
+  };
+  notes?: string;
 }
 

@@ -15,7 +15,7 @@ import { readFileSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { promises as fs } from 'fs';
-import { VisionAnalysis, InteractiveElement, SuggestedAction, ArchitectureInfo } from './types.js';
+import { VisionAnalysis, InteractiveElement, SuggestedAction, ArchitectureInfo, AIPageAnalysisResponse } from './types.js';
 import { Config } from './types.js';
 
 interface AIReasoningLog {
@@ -136,6 +136,9 @@ WHEN YOU ARE IN AUTHENTICATED STATE:
 3. Generate SPECIFIC actions to click on actual visible links and buttons - not generic "explore"
 4. DO NOT suggest going back to login or marketing pages
 5. Prioritize buttons and links that lead to app functionality (views, forms, data, actions)
+6. IMPORTANT: Form fields you see now are APPLICATION FORMS (create project, add ticket, settings, etc.) - NOT login forms
+   - Do NOT suggest "Fill username/password with credentials" for these forms
+   - These are feature forms for the app's functionality, not authentication
 
 === AUTHENTICATION GATE RULE ===
 Many pages require authentication. If this page appears to be a login/auth gateway, treat it as a GATE to pass through, not a destination to deeply test.
@@ -157,43 +160,41 @@ WHEN YOU DETECT A LOGIN/AUTH GATE:
 
 === RESPONSE FORMAT ===
 
-Provide your analysis in these sections:
+You MUST respond with a valid JSON object. Do NOT include any text before or after the JSON.
 
-**1. PAGE CLASSIFICATION**
-Type: [Auth Gate | Public Marketing | App Core | Settings | Error | Unknown]
-Purpose: [One sentence describing what this page is for]
+{
+  "pageClassification": {
+    "type": "auth_gate | public_marketing | app_core | settings | error | unknown",
+    "purpose": "One sentence describing what this page is for"
+  },
+  "pageDescription": "2-4 sentences describing what you see on the page - layout, content, key elements",
+  "interactiveElements": [
+    {
+      "type": "button | link | input | form | dropdown | checkbox | radio",
+      "text": "Visible text on the element",
+      "purpose": "What this element does",
+      "location": "Where on the page (e.g., header, main content, sidebar)"
+    }
+  ],
+  "suggestedActions": [
+    {
+      "action": "Click \"Button Text\" or Fill username field with credentials",
+      "priority": "high | medium | low"
+    }
+  ],
+  "loginInfo": {
+    "isLoginPage": true/false,
+    "hasCredentialFields": true/false
+  },
+  "notes": "Optional: Any critical bugs or blockers (1-2 sentences max)"
+}
 
-**2. PAGE DESCRIPTION**
-[2-4 sentences describing what you see on the page - layout, content, key elements]
+VALID ACTION FORMATS for suggestedActions:
+- Click "Exact Button Text"
+- Fill username field with credentials
+- Fill password field with credentials
 
-**3. INTERACTIVE ELEMENTS**
-List each clickable/fillable element:
-ELEMENT: [type] "[visible text]" - [what it does]
-
-Examples:
-ELEMENT: button "Sign In" - redirects to authentication provider
-ELEMENT: input "Email" - text field for email/username
-ELEMENT: link "Dashboard" - navigates to main dashboard
-
-**4. NEXT ACTIONS**
-List 1-3 actions. STRICT FORMAT REQUIRED - each action MUST start with "ACTION:" on its own line:
-
-ACTION: Click "Sign In"
-ACTION: Fill username field with credentials
-ACTION: Fill password field with credentials
-
-VALID ACTION FORMATS (use these EXACTLY):
-- ACTION: Click "Exact Button Text"
-- ACTION: Fill username field with credentials
-- ACTION: Fill password field with credentials
-
-DO NOT write prose, explanations, goals, or bullet points. ONLY write ACTION: lines.
-DO NOT write "- Goal:" or "### Priority" or any other text.
-WRONG: "- Click the sign in button to proceed"
-RIGHT: ACTION: Click "Sign In"
-
-**5. BRIEF NOTES** (optional, 1-2 sentences max)
-[Any critical bugs or blockers only]`;
+IMPORTANT: Return ONLY the JSON object, no markdown code blocks, no explanations.`;
 
     try {
       const response = await this.client.chat.completions.create({
@@ -216,10 +217,11 @@ RIGHT: ACTION: Click "Sign In"
           },
         ],
         max_completion_tokens: 2000,
+        response_format: { type: 'json_object' },
       });
 
       const content = response.choices[0]?.message?.content || '';
-      
+
       // Log reasoning - store FULL response to capture site understanding
       await this.logReasoning({
         timestamp: new Date().toISOString(),
@@ -239,15 +241,96 @@ RIGHT: ACTION: Click "Sign In"
           previousActionsCount: previousActions.length,
         },
       });
-      
-      return this.parseAnalysis(content, url);
+
+      return this.parseAnalysisJSON(content, url);
     } catch (error) {
       console.error('Error analyzing page with AI vision:', error);
       throw error;
     }
   }
 
-  private parseAnalysis(content: string, url: string): VisionAnalysis {
+  /**
+   * Parse structured JSON response from AI
+   */
+  private parseAnalysisJSON(content: string, url: string): VisionAnalysis {
+    console.log(`📄 AI Response (first 500 chars): ${content.substring(0, 500)}...`);
+
+    try {
+      // Parse the JSON response
+      const parsed: AIPageAnalysisResponse = JSON.parse(content);
+
+      // Map page classification type to pageType
+      let pageType = 'unknown';
+      const classificationType = parsed.pageClassification?.type || 'unknown';
+      if (classificationType === 'auth_gate') {
+        pageType = 'login';
+      } else if (classificationType === 'app_core') {
+        pageType = 'dashboard';
+      } else if (classificationType === 'settings') {
+        pageType = 'settings';
+      } else if (classificationType === 'error') {
+        pageType = 'error';
+      } else if (classificationType === 'public_marketing') {
+        pageType = 'marketing';
+      } else {
+        pageType = classificationType;
+      }
+
+      // Map interactive elements
+      const interactiveElements: InteractiveElement[] = (parsed.interactiveElements || []).map(el => ({
+        type: el.type as InteractiveElement['type'],
+        description: el.text,
+        location: el.location || 'unknown',
+        purpose: el.purpose,
+      }));
+
+      // Map suggested actions
+      const suggestedActions: SuggestedAction[] = (parsed.suggestedActions || []).map(action => ({
+        action: action.action,
+        reason: 'AI suggested action',
+        priority: action.priority as SuggestedAction['priority'],
+      }));
+
+      // Build login info
+      const loginInfo: import('./types.js').LoginInfo = {
+        isLoginPage: parsed.loginInfo?.isLoginPage || classificationType === 'auth_gate',
+        credentialsVisible: parsed.loginInfo?.hasCredentialFields,
+        shouldLogin: parsed.loginInfo?.isLoginPage || classificationType === 'auth_gate',
+      };
+
+      // Build architecture info (minimal for page analysis)
+      const architecture: ArchitectureInfo = {
+        layout: '',
+        navigation: [],
+        forms: [],
+        keyFeatures: [],
+        technology: [],
+      };
+
+      console.log(`📊 Parsed ${interactiveElements.length} interactive elements, ${suggestedActions.length} actions from JSON response`);
+
+      return {
+        description: parsed.pageDescription || parsed.pageClassification?.purpose || '',
+        interactiveElements,
+        suggestedActions: suggestedActions.length > 0 ? suggestedActions : [
+          { action: 'Explore navigation', reason: 'Initial exploration', priority: 'high' },
+        ],
+        pageType,
+        risks: [],
+        architecture,
+        loginInfo: loginInfo.isLoginPage ? loginInfo : undefined,
+      };
+    } catch (parseError) {
+      console.warn(`⚠️  Failed to parse JSON response, falling back to legacy parsing: ${parseError}`);
+      // Fallback to legacy parsing if JSON parsing fails
+      return this.parseAnalysisLegacy(content, url);
+    }
+  }
+
+  /**
+   * Legacy parsing method for non-JSON responses (fallback)
+   */
+  private parseAnalysisLegacy(content: string, url: string): VisionAnalysis {
     // Parse the AI response - this is a simplified parser
     // In production, you might want to use structured output or better parsing
     const lines = content.split('\n');

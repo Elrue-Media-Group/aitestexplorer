@@ -10,9 +10,10 @@ import { AutomationEngine } from './automation-engine.js';
 import { OutputGenerator } from './output-generator.js';
 import { AIVisionService } from './ai-vision.js';
 import { CostEstimator } from './cost-estimator.js';
-import { TestCaseGenerator } from './test-case-generator.js';
+import { TestCaseGenerator, SiteContext } from './test-case-generator.js';
 import { TestExecutor } from './test-executor.js';
 import { TestResultsFormatter } from './test-results-formatter.js';
+import { ContextFileConfig } from './types.js';
 import chalk from 'chalk';
 
 async function main() {
@@ -117,17 +118,7 @@ async function main() {
     const initialReport = await outputGenerator.generateReport(pages, url, []); // Empty test results for now
     
     // Extract site context from reports
-    const siteContext: {
-      architecture?: any;
-      risks?: any[];
-      fullReport?: string;
-      sitePurpose?: string;
-      contentNature?: 'static' | 'dynamic' | 'mixed';
-      contentPatterns?: string[];
-      updateFrequency?: 'real-time' | 'frequent' | 'periodic' | 'rare';
-      testingGuidance?: string;
-      contextFile?: any;
-    } = {
+    const siteContext: SiteContext = {
       architecture: initialReport.architecture,
       risks: initialReport.risks,
       fullReport: await readFullReport(runFolder),
@@ -142,7 +133,12 @@ async function main() {
       if (contextFile.contentNature) siteContext.contentNature = contextFile.contentNature;
       if (contextFile.contentPatterns) siteContext.contentPatterns = contextFile.contentPatterns;
       if (contextFile.updateFrequency) siteContext.updateFrequency = contextFile.updateFrequency;
-      if (contextFile.testingGuidance) siteContext.testingGuidance = contextFile.testingGuidance;
+      // Handle both testingGuidance formats (string or object)
+      if (typeof contextFile.testingGuidance === 'string') {
+        siteContext.testingGuidance = contextFile.testingGuidance;
+      } else if (contextFile.testingNotes) {
+        siteContext.testingGuidance = contextFile.testingNotes;
+      }
       // Store full context file for reference
       siteContext.contextFile = contextFile;
     }
@@ -216,28 +212,28 @@ async function readFullReport(runFolder: string): Promise<string | undefined> {
  * Load context file for a given URL if it exists
  * Returns the parsed context file or null if not found
  */
-async function loadContextFile(url: string): Promise<any | null> {
+async function loadContextFile(url: string): Promise<ContextFileConfig | null> {
   try {
     // Extract domain from URL
     const urlObj = new URL(url);
     let domain = urlObj.hostname;
-    
+
     // Remove www. prefix if present
     if (domain.startsWith('www.')) {
       domain = domain.substring(4);
     }
-    
+
     // Check for context file: context/{domain}.json
     const contextPath = join(process.cwd(), 'context', `${domain}.json`);
-    
+
     if (!existsSync(contextPath)) {
       return null; // No context file found - this is fine, continue normally
     }
-    
+
     // Load and parse context file
     const contextContent = await readFile(contextPath, 'utf-8');
-    const contextData = JSON.parse(contextContent);
-    
+    const contextData: ContextFileConfig = JSON.parse(contextContent);
+
     return contextData;
   } catch (error) {
     // If there's an error (file not found, invalid JSON, etc.), just return null

@@ -4,29 +4,31 @@ import { loadConfig } from './config.js';
 import { AutomationEngine } from './automation-engine.js';
 import { OutputGenerator } from './output-generator.js';
 import { AIVisionService } from './ai-vision.js';
-import { TestCaseGenerator } from './test-case-generator.js';
+import { TestCaseGenerator, SiteContext } from './test-case-generator.js';
 import { TestExecutor } from './test-executor.js';
 import { TestResultsFormatter } from './test-results-formatter.js';
+import { ContextFileConfig } from './types.js';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 
 /**
  * Test Runner
- * 
+ *
  * Orchestrates the complete test analysis workflow:
  * 1. Website exploration
  * 2. AI vision analysis
  * 3. Test case generation
  * 4. Test execution
  * 5. Results formatting
- * 
+ *
  * Can be called from both CLI and API endpoints.
- * 
+ *
  * @param url - Target website URL to analyze
  * @param maxPages - Maximum number of pages to explore
  * @param maxActions - Maximum number of interactive actions to perform
  * @param headless - Run browser in headless mode
  * @param runId - Optional run ID for tracking (auto-generated if not provided)
+ * @param maxTestsToExecute - Maximum number of tests to execute (0 = all, N = first N by priority)
  * @returns Promise with runId and success status
  */
 export async function runTestAnalysis(
@@ -34,7 +36,8 @@ export async function runTestAnalysis(
   maxPages: number,
   maxActions: number,
   headless: boolean,
-  runId?: string
+  runId?: string,
+  maxTestsToExecute: number = 0
 ): Promise<{ runId: string; success: boolean; error?: string }> {
   let runFolder: string = '';
   let progressPath: string = '';
@@ -109,6 +112,7 @@ export async function runTestAnalysis(
     const config = loadConfig();
     config.maxPages = maxPages;
     config.maxActions = maxActions;
+    config.maxTestsToExecute = maxTestsToExecute;
     config.headless = headless;
     
     // Initialize output generator FIRST to get reasoning log path
@@ -197,7 +201,7 @@ export async function runTestAnalysis(
       }
     }
     
-    const siteContext: any = {
+    const siteContext: SiteContext = {
       architecture: initialReport.architecture,
       risks: initialReport.risks,
       fullReport: fullReportContent,
@@ -226,14 +230,19 @@ export async function runTestAnalysis(
     if (existsSync(contextPath)) {
       try {
         const contextContent = await readFile(contextPath, 'utf-8');
-        const contextFile = JSON.parse(contextContent);
+        const contextFile: ContextFileConfig = JSON.parse(contextContent);
 
         // Merge context file data into siteContext (like CLI does)
         if (contextFile.sitePurpose) siteContext.sitePurpose = contextFile.sitePurpose;
         if (contextFile.contentNature) siteContext.contentNature = contextFile.contentNature;
         if (contextFile.contentPatterns) siteContext.contentPatterns = contextFile.contentPatterns;
         if (contextFile.updateFrequency) siteContext.updateFrequency = contextFile.updateFrequency;
-        if (contextFile.testingGuidance) siteContext.testingGuidance = contextFile.testingGuidance;
+        // Handle both testingGuidance formats (string or object)
+        if (typeof contextFile.testingGuidance === 'string') {
+          siteContext.testingGuidance = contextFile.testingGuidance;
+        } else if (contextFile.testingNotes) {
+          siteContext.testingGuidance = contextFile.testingNotes;
+        }
         // Store full context file for reference
         siteContext.contextFile = contextFile;
         console.log(`✅ [TestRunner] Context file loaded: ${contextPath}`);
@@ -277,26 +286,48 @@ export async function runTestAnalysis(
     if (!page) {
       throw new Error('Page not initialized');
     }
-    
+
     const executor = new TestExecutor(page, evidenceDir);
-    
+
+    // Sort tests by priority and apply execution limit
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    const sortedTests = [...testCases].sort((a, b) => {
+      const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 1;
+      const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 1;
+      return aPriority - bPriority;
+    });
+
+    // Apply maxTestsToExecute limit (0 = all)
+    const testsToExecute = maxTestsToExecute > 0
+      ? sortedTests.slice(0, maxTestsToExecute)
+      : sortedTests;
+
+    if (maxTestsToExecute > 0 && testCases.length > maxTestsToExecute) {
+      console.log(`🎯 Executing ${testsToExecute.length}/${testCases.length} tests (limited by maxTestsToExecute=${maxTestsToExecute}, sorted by priority)`);
+    }
+
     // Execute tests with progress updates
     const results: any[] = [];
-    for (let i = 0; i < testCases.length; i++) {
-      const testCase = testCases[i];
-      await updateProgress('executing', `Executing test ${i + 1}/${testCases.length}: ${testCase.name}`, {
-        totalTests: testCases.length,
+    const totalGenerated = testCases.length;
+    const totalToExecute = testsToExecute.length;
+
+    for (let i = 0; i < testsToExecute.length; i++) {
+      const testCase = testsToExecute[i];
+      await updateProgress('executing', `Executing test ${i + 1}/${totalToExecute}: ${testCase.name}`, {
+        totalTests: totalToExecute,
+        totalGenerated: totalGenerated,
         completedTests: i,
         currentTest: testCase.name,
         passedTests: results.filter(r => r.status === 'passed').length,
         failedTests: results.filter(r => r.status === 'failed').length
       });
-      
+
       const result = await executor.executeTestCase(testCase);
       results.push(result);
-      
-      await updateProgress('executing', `Completed test ${i + 1}/${testCases.length}`, {
-        totalTests: testCases.length,
+
+      await updateProgress('executing', `Completed test ${i + 1}/${totalToExecute}`, {
+        totalTests: totalToExecute,
+        totalGenerated: totalGenerated,
         completedTests: i + 1,
         passedTests: results.filter(r => r.status === 'passed').length,
         failedTests: results.filter(r => r.status === 'failed').length
