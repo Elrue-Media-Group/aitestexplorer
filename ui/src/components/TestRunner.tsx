@@ -3,12 +3,16 @@ import RunDetails from './RunDetails';
 
 interface TestRunnerProps {}
 
+type ExplorationMode = 'vision' | 'mcp' | 'hybrid';
+
 const TestRunner: React.FC<TestRunnerProps> = () => {
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(10);
   const [maxActions, setMaxActions] = useState(50);
   const [maxTestsToExecute, setMaxTestsToExecute] = useState(0);
   const [headless, setHeadless] = useState(false);
+  const [executeTests, setExecuteTests] = useState(true);
+  const [explorationMode, setExplorationMode] = useState<ExplorationMode>('hybrid');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -32,6 +36,8 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
           maxActions,
           maxTestsToExecute,
           headless,
+          explorationMode,
+          executeTests,
         }),
       });
 
@@ -120,10 +126,30 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
               max="500"
               value={maxTestsToExecute}
               onChange={(e) => setMaxTestsToExecute(parseInt(e.target.value) || 0)}
-              disabled={loading}
+              disabled={loading || !executeTests}
             />
             <small style={{ color: '#666', display: 'block', marginTop: '4px' }}>
               0 = run all tests, N = run first N tests (sorted by priority)
+            </small>
+          </div>
+        </div>
+
+        <div className="form-row">
+          <div className="form-group">
+            <label htmlFor="explorationMode">Exploration Mode</label>
+            <select
+              id="explorationMode"
+              value={explorationMode}
+              onChange={(e) => setExplorationMode(e.target.value as ExplorationMode)}
+              disabled={loading}
+              style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd' }}
+            >
+              <option value="vision">Vision (Screenshot-based)</option>
+              <option value="mcp">MCP (AI-driven per step)</option>
+              <option value="hybrid">Hybrid (Recommended - Fast & Reliable)</option>
+            </select>
+            <small style={{ color: '#666', display: 'block', marginTop: '4px' }}>
+              Hybrid: MCP exploration + scripted execution with self-healing. Best balance of speed and reliability.
             </small>
           </div>
         </div>
@@ -139,6 +165,22 @@ const TestRunner: React.FC<TestRunnerProps> = () => {
             />
             Run browser in headless mode (recommended)
           </label>
+        </div>
+
+        <div className="form-group">
+          <label>
+            <input
+              type="checkbox"
+              checked={executeTests}
+              onChange={(e) => setExecuteTests(e.target.checked)}
+              disabled={loading}
+              style={{ marginRight: '8px' }}
+            />
+            Execute generated tests
+          </label>
+          <small style={{ color: '#666', display: 'block', marginTop: '4px' }}>
+            When unchecked, only exploration and test generation run (useful for validating exploration)
+          </small>
         </div>
 
         <button type="submit" className="btn btn-primary" disabled={loading || !url}>

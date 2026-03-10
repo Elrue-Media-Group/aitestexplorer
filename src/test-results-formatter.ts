@@ -2,6 +2,24 @@ import { TestResult, StepResult } from './test-executor.js';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 
+// Extended result type for MCP execution
+interface MCPTestResult extends Partial<TestResult> {
+  testCaseId: string;
+  testCaseName: string;
+  status: 'passed' | 'failed' | 'skipped';
+  duration: number;
+  error?: string;
+  steps?: any[];
+  verifications?: Array<{
+    criterion: string;
+    passed: boolean;
+    method: 'structured' | 'ai_vision';
+    evidence: string;
+  }>;
+  aiAssessment?: string;
+  executedAt?: Date;
+}
+
 export class TestResultsFormatter {
   private outputDir: string;
 
@@ -11,8 +29,9 @@ export class TestResultsFormatter {
 
   /**
    * Format test results as markdown report
+   * Handles both traditional and MCP execution results
    */
-  formatResults(results: TestResult[]): string {
+  formatResults(results: (TestResult | MCPTestResult)[]): string {
     const passed = results.filter(r => r.status === 'passed').length;
     const failed = results.filter(r => r.status === 'failed').length;
     const skipped = results.filter(r => r.status === 'skipped').length;
@@ -42,14 +61,19 @@ export class TestResultsFormatter {
       
       content += `**Status:** ${result.status.toUpperCase()}\n\n`;
       content += `**Duration:** ${result.duration}ms\n\n`;
-      content += `**Executed At:** ${result.executedAt.toISOString()}\n\n`;
+      content += `**Executed At:** ${result.executedAt?.toISOString() || new Date().toISOString()}\n\n`;
 
       if (result.expectedResult) {
         content += `**Expected Result:** ${result.expectedResult}\n\n`;
       }
 
-      if (result.error) {
-        content += `**Error:** ${result.error}\n\n`;
+      // Always show failure reason prominently for failed tests
+      if (result.status === 'failed') {
+        if (result.error) {
+          content += `**❌ FAILURE REASON:** ${result.error}\n\n`;
+        } else {
+          content += `**❌ FAILURE REASON:** Unknown (no error message captured)\n\n`;
+        }
       }
 
       // Verification details
@@ -117,21 +141,22 @@ export class TestResultsFormatter {
       }
 
       content += `**Steps:**\n\n`;
-      for (const step of result.steps) {
+      const steps = result.steps || [];
+      for (const step of steps) {
         const stepIcon = step.status === 'passed' ? '✅' : step.status === 'failed' ? '❌' : '⏭️';
         content += `${stepIcon} Step ${step.stepNumber}: ${step.description}\n`;
-        
+
         if (step.expected && step.actual) {
           content += `   - Expected: ${step.expected}\n`;
           content += `   - Actual: ${step.actual}\n`;
-          
+
           // Add detailed information if available
           if (step.details) {
             if (step.details.title) {
               content += `   - Page Title: "${step.details.title}"\n`;
             }
             if (step.details.headings && step.details.headings.length > 0) {
-              content += `   - Headings: ${step.details.headings.slice(0, 2).map(h => `"${h}"`).join(', ')}\n`;
+              content += `   - Headings: ${step.details.headings.slice(0, 2).map((h: string) => `"${h}"`).join(', ')}\n`;
             }
             if (step.details.linksCount !== undefined) {
               content += `   - Links: ${step.details.linksCount}\n`;
@@ -185,6 +210,23 @@ export class TestResultsFormatter {
         content += '\n';
       }
 
+      // Add MCP-specific verifications if present
+      const mcpResult = result as MCPTestResult;
+      if (mcpResult.verifications && mcpResult.verifications.length > 0) {
+        content += `**Verifications:**\n\n`;
+        for (const v of mcpResult.verifications) {
+          const vIcon = v.passed ? '✅' : '❌';
+          content += `${vIcon} ${v.criterion}\n`;
+          content += `   - Method: ${v.method}\n`;
+          content += `   - Evidence: ${v.evidence}\n\n`;
+        }
+      }
+
+      // Add AI assessment if present
+      if (mcpResult.aiAssessment) {
+        content += `**AI Assessment:** ${mcpResult.aiAssessment}\n\n`;
+      }
+
       content += `---\n\n`;
     }
 
@@ -216,7 +258,7 @@ Total Tests: ${total}
   /**
    * Save results to file
    */
-  async saveResults(results: TestResult[]): Promise<string> {
+  async saveResults(results: (TestResult | MCPTestResult)[]): Promise<string> {
     const content = this.formatResults(results);
     const filePath = join(this.outputDir, 'test-results.md');
     await writeFile(filePath, content);

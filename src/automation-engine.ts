@@ -10,10 +10,10 @@
  */
 
 import { Browser, Page, chromium } from 'playwright';
-import { Config, PageState, Action, VisionAnalysis, SuggestedAction } from './types.js';
+import { Config, PageState, Action, ActionOutcome, VisionAnalysis, SuggestedAction } from './types.js';
 import { AIVisionService } from './ai-vision.js';
 import { mkdir, writeFile, readFile } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 export class AutomationEngine {
@@ -229,9 +229,8 @@ export class AutomationEngine {
           continue; // Skip this URL
         }
         
-        // Give a bit more time for dynamic content and analytics to initialize
-        await this.page.waitForTimeout(3000);
         this.navigationGuardActive = false; // Re-enable navigation guard
+        // Note: dynamic content wait is handled inside analyzeAndInteract() via waitForDynamicContent()
 
         try {
           const urlBeforeAnalysis = this.page.url();
@@ -460,9 +459,12 @@ export class AutomationEngine {
   private async analyzeAndInteract(url: string, isPostLoginAnalysis: boolean = false): Promise<PageState> {
     if (!this.page) throw new Error('Page not initialized');
 
+    // Wait for dynamic content to finish loading before capturing page state
+    await this.waitForDynamicContent();
+
     const title = await this.page.title();
     const timestamp = new Date();
-    
+
     // Take screenshot
     const screenshotPath = join(
       this.runScreenshotDir || this.config.screenshotDir,
@@ -1333,6 +1335,56 @@ export class AutomationEngine {
   }
 
   /**
+   * Wait for dynamic content to finish loading before capturing page state.
+   * AI-first approach: short buffer wait, then AI vision check if page looks loaded.
+   */
+  private async waitForDynamicContent(): Promise<void> {
+    if (!this.page) return;
+
+    // Short buffer wait - catches most timing issues without AI cost
+    await this.page.waitForTimeout(2000);
+
+    // Take a quick screenshot for AI to evaluate
+    const screenshotDir = this.runScreenshotDir || this.config.screenshotDir;
+    const tempScreenshot = join(screenshotDir, `loading-check-${Date.now()}.png`);
+
+    try {
+      await this.page.screenshot({ path: tempScreenshot, fullPage: false });
+      const result = await this.visionService.isPageLoaded(tempScreenshot);
+
+      if (result.loaded) {
+        console.log(`✅ Page loaded: ${result.reason}`);
+        // Clean up temp screenshot
+        try { unlinkSync(tempScreenshot); } catch {}
+        return;
+      }
+
+      // AI says still loading - wait and re-check (up to 2 more times)
+      console.log(`⏳ Page still loading: ${result.reason}`);
+      const maxRetries = 2;
+      for (let i = 0; i < maxRetries; i++) {
+        await this.page.waitForTimeout(5000); // Wait 5 seconds between checks
+
+        await this.page.screenshot({ path: tempScreenshot, fullPage: false });
+        const recheck = await this.visionService.isPageLoaded(tempScreenshot);
+
+        if (recheck.loaded) {
+          console.log(`✅ Page loaded after extra wait: ${recheck.reason}`);
+          try { unlinkSync(tempScreenshot); } catch {}
+          return;
+        }
+        console.log(`⏳ Still loading (check ${i + 2}): ${recheck.reason}`);
+      }
+
+      console.log('⚠️  Page may still be loading after max wait - proceeding with current state');
+      try { unlinkSync(tempScreenshot); } catch {}
+    } catch (error) {
+      console.warn(`⚠️  Loading check failed, proceeding: ${error}`);
+      try { unlinkSync(tempScreenshot); } catch {}
+    }
+  }
+
+  /**
    * Extract discovered elements from the current page
    */
   private async extractDiscoveredElements(url: string): Promise<import('./types.js').DiscoveredElements> {
@@ -1526,6 +1578,9 @@ export class AutomationEngine {
     const actionLower = suggestion.action.toLowerCase();
     const timestamp = new Date();
 
+    // FLOW-AWARE: Capture page state BEFORE the action
+    const stateBefore = await this.capturePageState();
+
     try {
       // Try to find and interact with elements
       if (actionLower.includes('click') || actionLower.includes('button') || actionLower.includes('link')) {
@@ -1661,12 +1716,29 @@ export class AutomationEngine {
           console.log(`🖱️  Clicking: "${text?.trim()}"`);
           await selectedButton.click();
 
+          // FLOW-AWARE: Wait for state to stabilize and capture outcome
+          await this.waitForStateStabilization(2000);
+          const stateAfter = await this.capturePageState();
+          const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
+          // Log what we observed
+          if (outcome.navigationOccurred) {
+            console.log(`   📍 OBSERVED: Navigation to ${outcome.urlAfter}`);
+          }
+          if (outcome.modalAppeared?.detected) {
+            console.log(`   📍 OBSERVED: Modal appeared (${outcome.modalAppeared.type}${outcome.modalAppeared.title ? `: ${outcome.modalAppeared.title}` : ''})`);
+          }
+          if (outcome.inlineUpdateDetected) {
+            console.log(`   📍 OBSERVED: Inline content update (no navigation)`);
+          }
+
           return {
             type: 'click',
             target: text || 'unknown',
             description: `Clicked: ${text || suggestion.action}`,
             timestamp,
             success: true,
+            outcome,
           };
         }
       } else if (actionLower.includes('fill') && actionLower.includes('credentials')) {
@@ -1698,6 +1770,12 @@ export class AutomationEngine {
             console.log(`🔑 AI-driven: Filling password field with credentials`);
             await passwordField.fill(credentials.password);
             this.hasCompletedLogin = false; // Will be set to true after successful navigation
+
+            // FLOW-AWARE: Capture state after filling
+            await this.page.waitForTimeout(300);
+            const stateAfter = await this.capturePageState();
+            const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
             return {
               type: 'type',
               target: 'password field',
@@ -1705,6 +1783,7 @@ export class AutomationEngine {
               description: `Filled password field with credentials`,
               timestamp,
               success: true,
+              outcome,
             };
           } else {
             console.log(`⚠️  Could not find password field on page`);
@@ -1716,6 +1795,12 @@ export class AutomationEngine {
           if (usernameField) {
             console.log(`🔑 AI-driven: Filling username field with credentials: ${credentials.username}`);
             await usernameField.fill(credentials.username);
+
+            // FLOW-AWARE: Capture state after filling
+            await this.page.waitForTimeout(300);
+            const stateAfter = await this.capturePageState();
+            const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
             return {
               type: 'type',
               target: 'username field',
@@ -1723,6 +1808,7 @@ export class AutomationEngine {
               description: `Filled username field with credentials`,
               timestamp,
               success: true,
+              outcome,
             };
           } else {
             console.log(`⚠️  Could not find username field on page`);
@@ -1742,6 +1828,15 @@ export class AutomationEngine {
 
           await input.fill(testValue);
 
+          // FLOW-AWARE: Capture state after typing
+          await this.page.waitForTimeout(500);
+          const stateAfter = await this.capturePageState();
+          const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
+          if (outcome.inlineUpdateDetected) {
+            console.log(`   📍 OBSERVED: Content update after typing`);
+          }
+
           return {
             type: 'type',
             target: placeholder,
@@ -1749,16 +1844,27 @@ export class AutomationEngine {
             description: `Typed "${testValue}" into ${placeholder}`,
             timestamp,
             success: true,
+            outcome,
           };
         }
       } else if (actionLower.includes('scroll')) {
         await this.page.evaluate(() => window.scrollBy(0, 500));
-        
+
+        // FLOW-AWARE: Capture state after scrolling (might trigger lazy loading)
+        await this.page.waitForTimeout(500);
+        const stateAfter = await this.capturePageState();
+        const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
+        if (outcome.inlineUpdateDetected) {
+          console.log(`   📍 OBSERVED: Content loaded after scrolling`);
+        }
+
         return {
           type: 'scroll',
           description: 'Scrolled down the page',
           timestamp,
           success: true,
+          outcome,
         };
       } else if (actionLower.includes('navigate') || actionLower.includes('explore navigation')) {
         // "Explore navigation" should actually click on navigation links
@@ -1785,13 +1891,23 @@ export class AutomationEngine {
           const selectedLink = sameDomainNavLinks[Math.floor(Math.random() * sameDomainNavLinks.length)];
           const text = await selectedLink.textContent();
           await selectedLink.click();
-          
+
+          // FLOW-AWARE: Wait for state to stabilize and capture outcome
+          await this.waitForStateStabilization(2000);
+          const stateAfter = await this.capturePageState();
+          const outcome = this.detectActionOutcome(stateBefore, stateAfter);
+
+          if (outcome.navigationOccurred) {
+            console.log(`   📍 OBSERVED: Navigation to ${outcome.urlAfter}`);
+          }
+
           return {
             type: 'click',
             target: text || 'navigation link',
             description: `Clicked navigation link: ${text || 'link'}`,
             timestamp,
             success: true,
+            outcome,
           };
         }
         // If no navigation links found, return null (don't count as action)
@@ -1960,6 +2076,163 @@ export class AutomationEngine {
     );
   }
 
+  // ============================================================================
+  // Flow-Aware Testing: State Capture and Outcome Detection
+  // ============================================================================
+
+  /**
+   * Capture current page state for before/after comparison
+   */
+  private async capturePageState(): Promise<{
+    url: string;
+    contentHash: string;
+    visibleModals: Array<{ type: string; title?: string }>;
+  }> {
+    if (!this.page) {
+      return { url: '', contentHash: '', visibleModals: [] };
+    }
+
+    const url = this.page.url();
+
+    // Compute a simple content hash based on visible text
+    const contentHash = await this.page.evaluate(() => {
+      const body = document.body;
+      if (!body) return '';
+      // Get visible text content and hash it
+      const text = body.innerText || '';
+      // Simple hash: use length + first/last chars + some sample chars
+      const sample = text.substring(0, 100) + text.substring(text.length - 100);
+      return `${text.length}:${sample.replace(/\s+/g, '').substring(0, 50)}`;
+    }).catch(() => '');
+
+    const visibleModals = await this.detectVisibleModals();
+
+    return { url, contentHash, visibleModals };
+  }
+
+  /**
+   * Detect visible modals, dialogs, dropdowns, and toasts on the page
+   */
+  private async detectVisibleModals(): Promise<Array<{ type: 'dialog' | 'dropdown' | 'popover' | 'toast'; title?: string }>> {
+    if (!this.page) return [];
+
+    try {
+      return await this.page.evaluate(() => {
+        const modals: Array<{ type: 'dialog' | 'dropdown' | 'popover' | 'toast'; title?: string }> = [];
+
+        // Check for dialogs (role="dialog" or common modal classes)
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], .modal, .dialog, [class*="modal"], [class*="dialog"]'));
+        for (const dialog of dialogs) {
+          const element = dialog as HTMLElement;
+          if (element.offsetParent !== null || getComputedStyle(element).display !== 'none') {
+            const title = dialog.querySelector('[role="heading"], h1, h2, h3, .modal-title, .dialog-title')?.textContent?.trim();
+            modals.push({ type: 'dialog', title });
+          }
+        }
+
+        // Check for dropdowns (visible dropdown menus)
+        const dropdowns = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], .dropdown-menu:not(.hidden), [class*="dropdown"][class*="open"], [class*="dropdown"][class*="visible"]'));
+        for (const dropdown of dropdowns) {
+          const element = dropdown as HTMLElement;
+          if (element.offsetParent !== null || getComputedStyle(element).display !== 'none') {
+            modals.push({ type: 'dropdown' });
+          }
+        }
+
+        // Check for toasts/notifications
+        const toasts = Array.from(document.querySelectorAll('[role="alert"], .toast, .notification, [class*="toast"], [class*="snackbar"]'));
+        for (const toast of toasts) {
+          const element = toast as HTMLElement;
+          if (element.offsetParent !== null || getComputedStyle(element).display !== 'none') {
+            const title = toast.textContent?.trim()?.substring(0, 100);
+            modals.push({ type: 'toast', title });
+          }
+        }
+
+        // Check for popovers
+        const popovers = Array.from(document.querySelectorAll('[role="tooltip"], .popover, [class*="popover"]'));
+        for (const popover of popovers) {
+          const element = popover as HTMLElement;
+          if (element.offsetParent !== null || getComputedStyle(element).display !== 'none') {
+            modals.push({ type: 'popover' });
+          }
+        }
+
+        return modals;
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Detect what happened after an action by comparing before/after states
+   */
+  private detectActionOutcome(
+    stateBefore: { url: string; contentHash: string; visibleModals: Array<{ type: string; title?: string }> },
+    stateAfter: { url: string; contentHash: string; visibleModals: Array<{ type: string; title?: string }> }
+  ): ActionOutcome {
+    const outcome: ActionOutcome = {
+      urlBefore: stateBefore.url,
+      urlAfter: stateAfter.url,
+      navigationOccurred: stateBefore.url !== stateAfter.url,
+      contentHashBefore: stateBefore.contentHash,
+      contentHashAfter: stateAfter.contentHash,
+    };
+
+    // Check for new modals
+    const modalsBefore = stateBefore.visibleModals.length;
+    const modalsAfter = stateAfter.visibleModals.length;
+
+    if (modalsAfter > modalsBefore) {
+      const newModal = stateAfter.visibleModals[stateAfter.visibleModals.length - 1];
+      outcome.modalAppeared = {
+        detected: true,
+        title: newModal?.title,
+        type: newModal?.type as 'dialog' | 'dropdown' | 'popover' | 'toast',
+      };
+    }
+
+    // Check for inline content updates (content changed but URL didn't)
+    if (!outcome.navigationOccurred && stateBefore.contentHash !== stateAfter.contentHash) {
+      outcome.inlineUpdateDetected = true;
+    }
+
+    return outcome;
+  }
+
+  /**
+   * Wait for page state to stabilize after an action
+   * Similar to the login flow stabilization pattern
+   */
+  private async waitForStateStabilization(maxWaitMs: number = 3000): Promise<void> {
+    if (!this.page) return;
+
+    const checkInterval = 300;
+    let waitedTime = 0;
+    let lastUrl = this.page.url();
+    let lastHash = await this.page.evaluate(() => document.body?.innerText?.length || 0).catch(() => 0);
+
+    while (waitedTime < maxWaitMs) {
+      await this.page.waitForTimeout(checkInterval);
+      waitedTime += checkInterval;
+
+      const currentUrl = this.page.url();
+      const currentHash = await this.page.evaluate(() => document.body?.innerText?.length || 0).catch(() => 0);
+
+      // Check if state has stabilized
+      if (currentUrl === lastUrl && currentHash === lastHash) {
+        // State hasn't changed for this interval, consider it stable
+        if (waitedTime >= checkInterval * 2) {
+          break;
+        }
+      } else {
+        // State changed, reset stability counter
+        lastUrl = currentUrl;
+        lastHash = currentHash;
+      }
+    }
+  }
 
   async cleanup(): Promise<void> {
     // Remove route handlers (if page still exists)

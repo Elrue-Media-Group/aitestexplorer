@@ -24,6 +24,7 @@ Thumbs.db
 # Internal review documents
 PUBLIC_RELEASE_CHECKLIST.md
 ARCHITECTURE.md
+MCP_MIGRATION_PLAN.md
 
 # Context files (keep template.json, ignore all others)
 context/*.json

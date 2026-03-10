@@ -15,7 +15,7 @@ import { readFileSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { promises as fs } from 'fs';
-import { VisionAnalysis, InteractiveElement, SuggestedAction, ArchitectureInfo, AIPageAnalysisResponse } from './types.js';
+import { VisionAnalysis, InteractiveElement, SuggestedAction, ArchitectureInfo, AIPageAnalysisResponse, ActionOutcome } from './types.js';
 import { Config } from './types.js';
 
 interface AIReasoningLog {
@@ -246,6 +246,180 @@ IMPORTANT: Return ONLY the JSON object, no markdown code blocks, no explanations
     } catch (error) {
       console.error('Error analyzing page with AI vision:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Get a quick AI interpretation of what happened after an action
+   * This is a lightweight call (~100 tokens) for significant state changes
+   *
+   * @param actionDescription - What action was performed (e.g., "Clicked 'New Project' button")
+   * @param outcome - The detected outcome from state comparison
+   * @param screenshotPath - Optional screenshot of the current state
+   * @returns Human-readable interpretation (e.g., "Navigated to project detail page")
+   */
+  async getQuickInterpretation(
+    actionDescription: string,
+    outcome: ActionOutcome,
+    screenshotPath?: string
+  ): Promise<string> {
+    // Build a concise prompt for quick interpretation
+    const prompt = `After performing: "${actionDescription}"
+
+Observed changes:
+- URL: ${outcome.urlBefore} → ${outcome.urlAfter}
+- Navigation occurred: ${outcome.navigationOccurred ? 'Yes' : 'No'}
+- Modal appeared: ${outcome.modalAppeared?.detected ? `Yes (${outcome.modalAppeared.type}${outcome.modalAppeared.title ? `: ${outcome.modalAppeared.title}` : ''})` : 'No'}
+- Inline content update: ${outcome.inlineUpdateDetected ? 'Yes' : 'No'}
+
+In ONE short sentence, describe what happened from a user's perspective.
+Examples:
+- "Navigated to project detail page showing project info"
+- "Form appeared in modal for creating new item"
+- "Item added to list without page navigation"
+- "Dropdown menu opened with options"
+
+Your interpretation:`;
+
+    try {
+      // If we have a screenshot, use vision for more accurate interpretation
+      if (screenshotPath) {
+        const imageBuffer = readFileSync(screenshotPath);
+        const base64Image = imageBuffer.toString('base64');
+
+        const response = await this.client.chat.completions.create({
+          model: this.model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                {
+                  type: 'image_url',
+                  image_url: { url: `data:image/png;base64,${base64Image}` },
+                },
+              ],
+            },
+          ],
+          max_completion_tokens: 100, // Keep it short
+        });
+
+        const interpretation = response.choices[0]?.message?.content?.trim() || '';
+        return interpretation;
+      } else {
+        // Without screenshot, use text-only interpretation
+        const response = await this.client.chat.completions.create({
+          model: this.model,
+          messages: [{ role: 'user', content: prompt }],
+          max_completion_tokens: 100,
+        });
+
+        const interpretation = response.choices[0]?.message?.content?.trim() || '';
+        return interpretation;
+      }
+    } catch (error) {
+      console.warn(`⚠️  Quick interpretation failed, using heuristic: ${error}`);
+      // Fallback to heuristic interpretation
+      return this.getHeuristicInterpretation(actionDescription, outcome);
+    }
+  }
+
+  /**
+   * Heuristic fallback for action interpretation (no AI call)
+   */
+  private getHeuristicInterpretation(actionDescription: string, outcome: ActionOutcome): string {
+    if (outcome.navigationOccurred) {
+      // Try to extract meaningful info from URL
+      const newPath = new URL(outcome.urlAfter).pathname;
+      const pathParts = newPath.split('/').filter(p => p);
+
+      if (pathParts.length > 0) {
+        const lastPart = pathParts[pathParts.length - 1];
+        // Check for common patterns
+        if (/^[a-f0-9-]{20,}$/i.test(lastPart)) {
+          // Looks like an ID - probably a detail page
+          const entityType = pathParts.length > 1 ? pathParts[pathParts.length - 2] : 'item';
+          return `Navigated to ${entityType} detail page`;
+        }
+        return `Navigated to ${lastPart.replace(/-/g, ' ')} page`;
+      }
+      return 'Navigated to new page';
+    }
+
+    if (outcome.modalAppeared?.detected) {
+      const modalType = outcome.modalAppeared.type || 'modal';
+      const title = outcome.modalAppeared.title;
+      if (title) {
+        return `${modalType.charAt(0).toUpperCase() + modalType.slice(1)} appeared: ${title}`;
+      }
+      return `${modalType.charAt(0).toUpperCase() + modalType.slice(1)} appeared`;
+    }
+
+    if (outcome.inlineUpdateDetected) {
+      return 'Page content updated (no navigation)';
+    }
+
+    return 'Action completed';
+  }
+
+  /**
+   * AI-first check: Is this page fully loaded or still loading?
+   * Uses vision to detect loading states like spinners, skeleton screens,
+   * "Loading..." text, empty content areas, etc.
+   * Returns { loaded: boolean, reason: string }
+   */
+  async isPageLoaded(screenshotPath: string): Promise<{ loaded: boolean; reason: string }> {
+    try {
+      const imageBuffer = readFileSync(screenshotPath);
+      const base64Image = imageBuffer.toString('base64');
+
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `Look at this webpage screenshot. Is the page FULLY LOADED with content, or is it still LOADING?
+
+Signs of STILL LOADING:
+- Spinner or loading animation visible
+- "Loading..." or similar text in the main content area
+- Skeleton/placeholder screens (gray boxes where content should be)
+- Empty content area where a list, feed, or data should appear
+- Progress bars
+
+Signs of FULLY LOADED:
+- Real content visible (articles, text, data, forms, images)
+- Interactive elements rendered (buttons, filters, cards)
+- Navigation AND main content both visible
+
+Respond with ONLY valid JSON:
+{"loaded": true/false, "reason": "one short sentence explaining why"}`,
+              },
+              {
+                type: 'image_url',
+                image_url: { url: `data:image/png;base64,${base64Image}` },
+              },
+            ],
+          },
+        ],
+        max_completion_tokens: 80,
+      });
+
+      const content = response.choices[0]?.message?.content?.trim() || '';
+      // Parse JSON from response (handle markdown code blocks)
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return { loaded: !!parsed.loaded, reason: parsed.reason || '' };
+      }
+      // If can't parse, assume loaded
+      return { loaded: true, reason: 'Could not parse AI response, assuming loaded' };
+    } catch (error) {
+      console.warn(`⚠️  AI page load check failed: ${error}`);
+      return { loaded: true, reason: 'AI check failed, assuming loaded' };
     }
   }
 

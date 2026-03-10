@@ -30,8 +30,8 @@ const CollapsibleTestCases: React.FC<CollapsibleTestCasesProps> = ({ markdown })
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // Match test case header: ## TC-001: Title
-      const headerMatch = line.match(/^##\s+(TC-\d+):\s+(.+)$/);
+      // Match test case header: ## TC-001: Title or ## IT-001: Title (Intent Test)
+      const headerMatch = line.match(/^##\s+((?:TC|IT)-\d+):\s+(.+)$/);
       if (headerMatch) {
         // Save previous case if exists
         if (currentCase && currentCase.id) {
@@ -76,11 +76,18 @@ const CollapsibleTestCases: React.FC<CollapsibleTestCasesProps> = ({ markdown })
         const match = line.match(/^\*\*Expected Result:\*\*\s+(.+)$/i);
         if (match) currentCase.expectedResult = match[1];
         inSteps = false;
-      } else if (line.match(/^\*\*Steps:\*\*/i)) {
+      } else if (line.match(/^\*\*Steps(?:\s+Executed)?:\*\*/i)) {
+        // Match both "**Steps:**" and "**Steps Executed:**" formats
         inSteps = true;
       } else if (inSteps && line.match(/^\d+\.\s+/)) {
-        // Parse step line
+        // Parse step line (e.g., "1. ✅ **click** on `e19`")
         currentSteps.push(line);
+      } else if (inSteps && line.match(/^\s{2,}-\s+/)) {
+        // Continuation line for MCP format (e.g., "   - click e19 - Description")
+        // Append to the last step
+        if (currentSteps.length > 0) {
+          currentSteps[currentSteps.length - 1] += '\n' + line;
+        }
       }
     }
 

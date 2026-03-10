@@ -7,14 +7,17 @@ import { writeFile, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { loadConfig } from './config.js';
 import { AutomationEngine } from './automation-engine.js';
+import { MCPExplorer } from './mcp-explorer.js';
 import { OutputGenerator } from './output-generator.js';
 import { AIVisionService } from './ai-vision.js';
 import { CostEstimator } from './cost-estimator.js';
 import { TestCaseGenerator, SiteContext } from './test-case-generator.js';
 import { TestExecutor } from './test-executor.js';
 import { TestResultsFormatter } from './test-results-formatter.js';
-import { ContextFileConfig } from './types.js';
+import { ContextFileConfig, PageState } from './types.js';
 import chalk from 'chalk';
+
+type ExplorationMode = 'vision' | 'mcp';
 
 async function main() {
   const argv = await yargs(hideBin(process.argv))
@@ -49,6 +52,12 @@ async function main() {
       description: 'Skip cost estimate display',
       default: false,
     })
+    .option('exploration-mode', {
+      type: 'string',
+      description: 'Exploration mode: "vision" (screenshot-based) or "mcp" (MCP + vision hybrid)',
+      choices: ['vision', 'mcp'],
+      default: 'vision',
+    })
     .help()
     .parse();
 
@@ -57,11 +66,13 @@ async function main() {
   const maxActions = argv['max-actions'] as number;
   const estimateOnly = argv.estimate as boolean;
   const skipEstimate = argv['skip-estimate'] as boolean;
+  const explorationMode = argv['exploration-mode'] as ExplorationMode;
 
   console.log(chalk.blue.bold('\n🤖 AI-Powered Website Automation Tool\n'));
   console.log(chalk.gray(`Target URL: ${url}`));
   console.log(chalk.gray(`Max Pages: ${maxPages}`));
-  console.log(chalk.gray(`Max Actions: ${maxActions}\n`));
+  console.log(chalk.gray(`Max Actions: ${maxActions}`));
+  console.log(chalk.gray(`Exploration Mode: ${explorationMode}\n`));
 
   // Calculate and display cost estimate
   const costEstimator = new CostEstimator();
@@ -98,18 +109,45 @@ async function main() {
     // Update output generator with vision service
     (outputGenerator as any).visionService = visionService;
 
+    // Load context file early if available (needed for MCP mode)
+    const contextFile = await loadContextFile(url);
+    if (contextFile) {
+      console.log(chalk.cyan(`📋 Loaded context file for enhanced test generation\n`));
+    }
+
     // Initialize automation engine with run-specific screenshot directory
     const engine = new AutomationEngine(config);
-    await engine.initialize(screenshotsDir);
+    let pages: PageState[];
+    let actionCount: number;
 
-    console.log(chalk.green('✅ Engine initialized\n'));
+    if (explorationMode === 'mcp') {
+      // MCP + Vision hybrid exploration
+      console.log(chalk.yellow('🚀 Starting MCP exploration (AI Vision + MCP hybrid)...\n'));
 
-    // Explore website
-    console.log(chalk.yellow('🚀 Starting website exploration...\n'));
-    const pages = await engine.exploreWebsite(url);
+      const mcpExplorer = new MCPExplorer(config, {
+        maxPages,
+        maxActions,
+        headless: argv.headless as boolean,
+        screenshotDir: screenshotsDir,
+        contextFile: contextFile || undefined,
+      });
+
+      pages = await mcpExplorer.explore(url);
+      actionCount = pages.reduce((sum, p) => sum + p.actions.length, 0);
+
+      // We still need to initialize engine for test execution later
+      await engine.initialize(screenshotsDir);
+    } else {
+      // Vision-based exploration (original)
+      await engine.initialize(screenshotsDir);
+      console.log(chalk.green('✅ Engine initialized\n'));
+      console.log(chalk.yellow('🚀 Starting website exploration...\n'));
+      pages = await engine.exploreWebsite(url);
+      actionCount = engine.getActionCount();
+    }
 
     console.log(chalk.green(`\n✅ Explored ${pages.length} pages`));
-    console.log(chalk.green(`✅ Performed ${engine.getActionCount()} actions\n`));
+    console.log(chalk.green(`✅ Performed ${actionCount} actions\n`));
 
     // Generate comprehensive reports first (to get full site understanding)
     console.log(chalk.yellow('📊 Generating comprehensive reports for site understanding...\n'));
@@ -124,11 +162,8 @@ async function main() {
       fullReport: await readFullReport(runFolder),
     };
 
-    // Load context file if available (optional enhancement)
-    const contextFile = await loadContextFile(url);
+    // Merge context file data into siteContext (already loaded above)
     if (contextFile) {
-      console.log(chalk.cyan(`📋 Loaded context file for enhanced test generation\n`));
-      // Merge context file data into siteContext
       if (contextFile.sitePurpose) siteContext.sitePurpose = contextFile.sitePurpose;
       if (contextFile.contentNature) siteContext.contentNature = contextFile.contentNature;
       if (contextFile.contentPatterns) siteContext.contentPatterns = contextFile.contentPatterns;
@@ -185,7 +220,7 @@ async function main() {
     console.log(chalk.cyan(`📁 Output directory: ${outputGenerator.getRunFolder()}\n`));
     
     // Show final cost estimate
-    const finalEstimate = costEstimator.estimateCost(pages.length, engine.getActionCount());
+    const finalEstimate = costEstimator.estimateCost(pages.length, actionCount);
     console.log(chalk.yellow(`💰 Estimated cost for this run: $${finalEstimate.totalCost.toFixed(4)}\n`));
 
     // Cleanup

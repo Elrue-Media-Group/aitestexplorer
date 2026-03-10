@@ -17,6 +17,14 @@ interface TestStep {
   rawContent: string;
 }
 
+interface VerificationResult {
+  description: string;
+  passed: boolean;
+  expected?: string;
+  actual?: string;
+  evidence?: string;
+}
+
 interface TestCase {
   id: string;
   name: string;
@@ -26,7 +34,9 @@ interface TestCase {
   description?: string;
   expectedResult?: string;
   error?: string;
+  failureReason?: string;
   steps: TestStep[];
+  verifications: VerificationResult[];
   content: string; // Full markdown content for this test case
 }
 
@@ -35,14 +45,79 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
   const [showStepsFor, setShowStepsFor] = useState<Set<string>>(new Set());
 
+  // Parse verification details from test case content
+  const parseVerifications = (content: string): VerificationResult[] => {
+    const verifications: VerificationResult[] = [];
+    const lines = content.split('\n');
+    let i = 0;
+
+    // Look for **Verification Details:** section
+    while (i < lines.length && !lines[i].match(/^\*\*Verification Details:\*\*/i)) {
+      i++;
+    }
+
+    if (i >= lines.length) return verifications; // No verification section found
+
+    i++; // Move past **Verification Details:** line
+
+    let currentVerification: Partial<VerificationResult> | null = null;
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // Check if we've reached the end (next section or separator)
+      if (line.match(/^#{2,3}\s+/) || line.match(/^---$/) || line.match(/^\*\*(?!-)/) && !line.match(/^\*\*\s*[✅❌]/)) {
+        break;
+      }
+
+      // Match verification header: ✅ **Description** or ❌ **Description**
+      const verificationMatch = line.match(/^([✅❌])\s+\*\*(.+?)\*\*$/);
+      if (verificationMatch) {
+        // Save previous verification if exists
+        if (currentVerification) {
+          verifications.push(currentVerification as VerificationResult);
+        }
+
+        currentVerification = {
+          passed: verificationMatch[1] === '✅',
+          description: verificationMatch[2].trim()
+        };
+      } else if (currentVerification) {
+        // Extract metadata from bullet points
+        const bulletMatch = line.match(/^\s*-\s*(.+?):\s*(.+)$/);
+        if (bulletMatch) {
+          const key = bulletMatch[1].trim().toLowerCase();
+          const value = bulletMatch[2].trim();
+
+          if (key === 'expected') {
+            currentVerification.expected = value;
+          } else if (key === 'actual') {
+            currentVerification.actual = value;
+          } else if (key === 'content preview' || key === 'evidence') {
+            currentVerification.evidence = value;
+          }
+        }
+      }
+
+      i++;
+    }
+
+    // Don't forget the last verification
+    if (currentVerification) {
+      verifications.push(currentVerification as VerificationResult);
+    }
+
+    return verifications;
+  };
+
   // Parse steps from test case content
   const parseSteps = (content: string): TestStep[] => {
     const steps: TestStep[] = [];
     const lines = content.split('\n');
     let i = 0;
 
-    // Look for **Steps:** section
-    while (i < lines.length && !lines[i].match(/^\*\*Steps:\*\*/i)) {
+    // Look for **Steps:** or **Steps Executed:** section
+    while (i < lines.length && !lines[i].match(/^\*\*Steps(?:\s+Executed)?:\*\*/i)) {
       i++;
     }
 
@@ -132,7 +207,8 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
       const line = lines[i];
 
       // Detect test case header: ### ✅ TC-XXX: Name or ### ❌ TC-XXX: Name or ## TC-XXX: Name
-      const testCaseMatch = line.match(/^#{2,3}\s+([✅❌⏭️📋])?\s*(TC-\d+):\s*(.+)$/);
+      // Match TC-XXX or IT-XXX (Intent Test) format
+      const testCaseMatch = line.match(/^#{2,3}\s+([✅❌⏭️📋])?\s*((?:TC|IT)-\d+):\s*(.+)$/);
       if (testCaseMatch) {
         // Save previous test case if exists
         if (currentCase && inTestCase) {
@@ -140,7 +216,8 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
           cases.push({
             ...currentCase as TestCase,
             content: content,
-            steps: parseSteps(content)
+            steps: parseSteps(content),
+            verifications: parseVerifications(content)
           });
         }
 
@@ -157,6 +234,7 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
           name: testCaseMatch[3].trim(),
           status: status,
           steps: [],
+          verifications: [],
           content: ''
         };
         currentContent = [line];
@@ -184,6 +262,12 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
         if (errorLine && !errorLine.match(/^[-*]/)) {
           currentCase.error = errorLine.trim();
         }
+      }
+
+      // Parse failure reason (new format)
+      const failureReasonMatch = line.match(/^\*\*❌ FAILURE REASON:\*\*\s*(.+)$/i);
+      if (failureReasonMatch && currentCase) {
+        currentCase.failureReason = failureReasonMatch[1].trim();
       }
 
       if (line.match(/^\*\*Description:\*\*/i) && currentCase) {
@@ -221,7 +305,8 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
           cases.push({
             ...currentCase as TestCase,
             content: content,
-            steps: parseSteps(content)
+            steps: parseSteps(content),
+            verifications: parseVerifications(content)
           });
         }
         inTestCase = false;
@@ -240,7 +325,8 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
       cases.push({
         ...currentCase as TestCase,
         content: content,
-        steps: parseSteps(content)
+        steps: parseSteps(content),
+        verifications: parseVerifications(content)
       });
     }
 
@@ -485,10 +571,17 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
                       {testCase.description}
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: '16px', marginLeft: '32px', marginTop: '8px', fontSize: '12px', color: '#999' }}>
+                  <div style={{ display: 'flex', gap: '16px', marginLeft: '32px', marginTop: '8px', fontSize: '12px', color: '#999', flexWrap: 'wrap' }}>
                     {testCase.duration && <span>⏱️ {testCase.duration}</span>}
                     {totalSteps > 0 && <span>📋 {passedSteps}/{totalSteps} steps passed</span>}
-                    {testCase.error && <span style={{ color: '#dc3545' }}>⚠️ {testCase.error}</span>}
+                    {testCase.verifications && testCase.verifications.length > 0 && (
+                      <span style={{ color: testCase.verifications.some(v => !v.passed) ? '#dc3545' : '#28a745' }}>
+                        🔍 {testCase.verifications.filter(v => v.passed).length}/{testCase.verifications.length} verifications passed
+                      </span>
+                    )}
+                    {(testCase.failureReason || testCase.error) && (
+                      <span style={{ color: '#dc3545' }}>⚠️ {testCase.failureReason || testCase.error}</span>
+                    )}
                   </div>
                 </div>
                 <div style={{ fontSize: '20px', color: '#999', marginLeft: '16px' }}>
@@ -518,6 +611,56 @@ const CollapsibleTestResults: React.FC<CollapsibleTestResultsProps> = ({ markdow
                     <div style={{ marginBottom: '16px', padding: '12px', background: '#e7f3ff', borderLeft: '3px solid #2196F3', borderRadius: '4px' }}>
                       <strong style={{ color: '#1976D2', fontSize: '13px' }}>Expected Result:</strong>
                       <div style={{ marginTop: '4px', fontSize: '14px', color: '#333' }}>{testCase.expectedResult}</div>
+                    </div>
+                  )}
+
+                  {/* Failure Reason - show prominently for failed tests */}
+                  {testCase.status === 'failed' && (testCase.failureReason || testCase.error) && (
+                    <div style={{ marginBottom: '16px', padding: '12px', background: '#f8d7da', borderLeft: '3px solid #dc3545', borderRadius: '4px' }}>
+                      <strong style={{ color: '#721c24', fontSize: '13px' }}>❌ Failure Reason:</strong>
+                      <div style={{ marginTop: '4px', fontSize: '14px', color: '#721c24' }}>
+                        {testCase.failureReason || testCase.error}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Verification Results - show for failed tests or any test with verifications */}
+                  {testCase.verifications && testCase.verifications.length > 0 && (
+                    <div style={{ marginBottom: '16px', padding: '12px', background: '#fff', border: '1px solid #ddd', borderRadius: '4px' }}>
+                      <strong style={{ color: '#333', fontSize: '13px', display: 'block', marginBottom: '8px' }}>
+                        Verification Results:
+                      </strong>
+                      {testCase.verifications.map((v, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            padding: '8px',
+                            marginTop: idx > 0 ? '8px' : '0',
+                            background: v.passed ? '#d4edda' : '#f8d7da',
+                            borderLeft: `3px solid ${v.passed ? '#28a745' : '#dc3545'}`,
+                            borderRadius: '4px'
+                          }}
+                        >
+                          <div style={{ fontWeight: '500', color: v.passed ? '#155724' : '#721c24' }}>
+                            {v.passed ? '✅' : '❌'} {v.description}
+                          </div>
+                          {v.expected && (
+                            <div style={{ fontSize: '13px', marginTop: '4px', color: '#666' }}>
+                              <strong>Expected:</strong> {v.expected}
+                            </div>
+                          )}
+                          {v.actual && (
+                            <div style={{ fontSize: '13px', marginTop: '2px', color: '#666' }}>
+                              <strong>Actual:</strong> {v.actual}
+                            </div>
+                          )}
+                          {v.evidence && (
+                            <div style={{ fontSize: '13px', marginTop: '2px', color: '#666', fontStyle: 'italic' }}>
+                              <strong>Evidence:</strong> {v.evidence}
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
 

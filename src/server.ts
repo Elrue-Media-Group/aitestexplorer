@@ -49,19 +49,24 @@ app.get('/api/health', (req: express.Request, res: express.Response) => {
 // Run test analysis
 app.post('/api/run-test', async (req: express.Request, res: express.Response) => {
   try {
-    const { url, maxPages = 10, maxActions = 50, maxTestsToExecute = 0, headless = false } = req.body;
+    const { url, maxPages = 10, maxActions = 50, maxTestsToExecute = 0, headless = false, explorationMode = 'hybrid', executeTests = true } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
     }
 
+    // Validate exploration mode
+    if (explorationMode !== 'vision' && explorationMode !== 'mcp' && explorationMode !== 'hybrid') {
+      return res.status(400).json({ error: 'explorationMode must be "vision", "mcp", or "hybrid"' });
+    }
+
     // Run test asynchronously
     const runId = `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 
-    console.log(`[API] Starting test run: ${runId} for URL: ${url} (maxTestsToExecute: ${maxTestsToExecute === 0 ? 'all' : maxTestsToExecute})`);
+    console.log(`[API] Starting test run: ${runId} for URL: ${url} (mode: ${explorationMode}, maxTestsToExecute: ${maxTestsToExecute === 0 ? 'all' : maxTestsToExecute})`);
 
     // Start test run in background
-    runTestAnalysis(url, maxPages, maxActions, headless, runId, maxTestsToExecute)
+    runTestAnalysis(url, maxPages, maxActions, headless, runId, maxTestsToExecute, explorationMode, executeTests)
       .then((result) => {
         console.log(`[API] Test run ${runId} completed:`, result);
       })
@@ -95,10 +100,6 @@ app.get('/api/runs/:runId/status', async (req: express.Request, res: express.Res
       return res.status(404).json({ error: 'Run not found' });
     }
 
-    // Check if test-results.md exists (test completed)
-    const resultsPath = join(outputDir, 'test-results.md');
-    const isComplete = existsSync(resultsPath);
-    
     // Read progress if available
     let progress = null;
     const progressPath = join(outputDir, 'progress.json');
@@ -110,6 +111,12 @@ app.get('/api/runs/:runId/status', async (req: express.Request, res: express.Res
         // Ignore parse errors
       }
     }
+
+    // Determine completion: progress.json is primary, test-results.md is fallback
+    const progressComplete = progress?.stage === 'completed';
+    const progressError = progress?.stage === 'error';
+    const resultsPath = join(outputDir, 'test-results.md');
+    const hasResults = existsSync(resultsPath);
 
     // Read log file if available
     let logs = '';
@@ -124,7 +131,7 @@ app.get('/api/runs/:runId/status', async (req: express.Request, res: express.Res
 
     res.json({
       runId,
-      status: isComplete ? 'completed' : (progress?.stage === 'completed' ? 'completed' : 'running'),
+      status: progressComplete || hasResults ? 'completed' : progressError ? 'error' : 'running',
       progress,
       logs: logs.split('\n').filter(line => line.trim().length > 0)
     });
@@ -153,20 +160,37 @@ app.get('/api/runs', async (req: express.Request, res: express.Response) => {
           const runId = dirent.name;
           const runDir = join(outputDir, runId);
           const resultsPath = join(runDir, 'test-results.md');
-          const isComplete = existsSync(resultsPath);
-          
+          const hasResults = existsSync(resultsPath);
+
+          // Check progress.json for completion (handles execution-skipped runs)
+          let progressComplete = false;
+          let progressError = false;
+          let executionSkipped = false;
+          const progressPath = join(runDir, 'progress.json');
+          if (existsSync(progressPath)) {
+            try {
+              const progressData = await readFile(progressPath, 'utf-8');
+              const progress = JSON.parse(progressData);
+              progressComplete = progress.stage === 'completed';
+              progressError = progress.stage === 'error';
+              executionSkipped = !!progress.executionSkipped;
+            } catch {
+              // Ignore parse errors
+            }
+          }
+
           // Try to read basic info
           let testCount = 0;
           let passCount = 0;
           let failCount = 0;
-          
-          if (isComplete) {
+
+          if (hasResults) {
             try {
               const resultsContent = await readFile(resultsPath, 'utf-8');
               const totalMatch = resultsContent.match(/Total Tests.*?(\d+)/);
               const passedMatch = resultsContent.match(/✅ Passed.*?(\d+)/);
               const failedMatch = resultsContent.match(/❌ Failed.*?(\d+)/);
-              
+
               testCount = totalMatch ? parseInt(totalMatch[1]) : 0;
               passCount = passedMatch ? parseInt(passedMatch[1]) : 0;
               failCount = failedMatch ? parseInt(failedMatch[1]) : 0;
@@ -177,11 +201,12 @@ app.get('/api/runs', async (req: express.Request, res: express.Response) => {
 
           return {
             runId,
-            status: isComplete ? 'completed' : 'running',
+            status: progressComplete || hasResults ? 'completed' : progressError ? 'error' : 'running',
             createdAt: runId.replace('run-', '').replace(/-/g, ':').slice(0, -1),
             testCount,
             passCount,
-            failCount
+            failCount,
+            executionSkipped
           };
         })
     );

@@ -6,10 +6,15 @@ import { OutputGenerator } from './output-generator.js';
 import { AIVisionService } from './ai-vision.js';
 import { TestCaseGenerator, SiteContext } from './test-case-generator.js';
 import { TestExecutor } from './test-executor.js';
+import { MCPTestExecutor } from './mcp-test-executor.js';
+import { HybridTestExecutor } from './hybrid-executor.js';
 import { TestResultsFormatter } from './test-results-formatter.js';
-import { ContextFileConfig } from './types.js';
+import { ContextFileConfig, PageState, IntentTestCase, IntentTestResult, HybridTestResult } from './types.js';
+import { MCPExplorer } from './mcp-explorer.js';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
+
+export type ExplorationMode = 'vision' | 'mcp' | 'hybrid';
 
 /**
  * Test Runner
@@ -29,6 +34,8 @@ import { existsSync } from 'fs';
  * @param headless - Run browser in headless mode
  * @param runId - Optional run ID for tracking (auto-generated if not provided)
  * @param maxTestsToExecute - Maximum number of tests to execute (0 = all, N = first N by priority)
+ * @param explorationMode - Exploration mode: 'vision' (default) or 'mcp'
+ * @param executeTests - Whether to execute generated tests (default true). When false, only exploration and test generation run.
  * @returns Promise with runId and success status
  */
 export async function runTestAnalysis(
@@ -37,7 +44,9 @@ export async function runTestAnalysis(
   maxActions: number,
   headless: boolean,
   runId?: string,
-  maxTestsToExecute: number = 0
+  maxTestsToExecute: number = 0,
+  explorationMode: ExplorationMode = 'vision',
+  executeTests: boolean = true
 ): Promise<{ runId: string; success: boolean; error?: string }> {
   let runFolder: string = '';
   let progressPath: string = '';
@@ -126,14 +135,23 @@ export async function runTestAnalysis(
     // Update output generator with vision service
     (outputGenerator as any).visionService = visionService;
 
-    // Initialize automation engine with screenshot directory
+    // Initialize screenshot directory
     const screenshotsDir = join(runFolder, 'screenshots');
     if (!existsSync(screenshotsDir)) {
       await mkdir(screenshotsDir, { recursive: true });
     }
-    
-    const engine = new AutomationEngine(config);
-    await engine.initialize(screenshotsDir);
+
+    // Initialize automation engine (needed for both modes - MCP for exploration, Vision for execution)
+    let engine: AutomationEngine | null = null;
+    let mcpExplorer: MCPExplorer | null = null;
+
+    if (explorationMode === 'mcp' || explorationMode === 'hybrid') {
+      console.log(`[TestRunner] Using ${explorationMode.toUpperCase()} exploration mode`);
+    } else {
+      console.log('[TestRunner] Using Vision exploration mode');
+      engine = new AutomationEngine(config);
+      await engine.initialize(screenshotsDir);
+    }
 
     // Capture console output from automation engine
     const originalConsoleLog = console.log;
@@ -171,16 +189,59 @@ export async function runTestAnalysis(
       logToFile('WARN', ...args);
     };
 
-    await updateProgress('exploring', 'Exploring website...', { pagesVisited: 0 });
+    await updateProgress('exploring', `Exploring website (${explorationMode} mode)...`, { pagesVisited: 0, explorationMode });
 
-    // Explore website
-    const pages = await engine.exploreWebsite(url);
-    await updateProgress('exploring', `Explored ${pages.length} page(s)`, { pagesVisited: pages.length });
-    
-    // Restore original console methods
-    console.log = originalConsoleLog;
-    console.error = originalConsoleError;
-    console.warn = originalConsoleWarn;
+    // Explore website using selected mode
+    let pages: PageState[];
+
+    if (explorationMode === 'mcp' || explorationMode === 'hybrid') {
+      // Load context file for MCP explorer
+      const urlObj = new URL(url);
+      const domain = urlObj.hostname.replace('www.', '');
+      const port = urlObj.port;
+      let contextFile: ContextFileConfig | undefined;
+
+      let contextPath = port
+        ? join(process.cwd(), 'context', `${domain}-${port}.json`)
+        : join(process.cwd(), 'context', `${domain}.json`);
+
+      if (port && !existsSync(contextPath)) {
+        contextPath = join(process.cwd(), 'context', `${domain}.json`);
+      }
+
+      if (existsSync(contextPath)) {
+        try {
+          const contextContent = await readFile(contextPath, 'utf-8');
+          contextFile = JSON.parse(contextContent);
+          console.log(`[TestRunner] Loaded context file for MCP: ${contextPath}`);
+        } catch (error) {
+          console.warn('[TestRunner] Could not load context file:', error);
+        }
+      }
+
+      // Use MCP Explorer - keep browser alive for hybrid mode
+      mcpExplorer = new MCPExplorer(config, {
+        maxPages,
+        maxActions,
+        headless,
+        screenshotDir: screenshotsDir,
+        contextFile,
+        keepBrowserAlive: explorationMode === 'hybrid',
+      });
+
+      pages = await mcpExplorer.explore(url);
+    } else {
+      // Use traditional Vision-based exploration
+      if (!engine) {
+        throw new Error('AutomationEngine not initialized');
+      }
+      pages = await engine.exploreWebsite(url);
+    }
+
+    await updateProgress('exploring', `Explored ${pages.length} page(s)`, { pagesVisited: pages.length, explorationMode });
+
+    // NOTE: Keep console capture active through test execution so hybrid executor logs are captured
+    // Console will be restored after all tests complete
 
     await updateProgress('analyzing', 'Analyzing pages with AI vision...', { pagesToAnalyze: pages.length });
 
@@ -246,13 +307,33 @@ export async function runTestAnalysis(
         // Store full context file for reference
         siteContext.contextFile = contextFile;
         console.log(`✅ [TestRunner] Context file loaded: ${contextPath}`);
-        console.log('🔍 [TestRunner] siteContext.contextFile exists?', !!siteContext.contextFile);
-        console.log('🔍 [TestRunner] siteContext.contextFile.credentials?', !!siteContext.contextFile?.credentials);
+        // Log credentials location for debugging
+        const credsLocation = contextFile.credentials ? 'credentials' :
+                              contextFile.authentication?.credentials ? 'authentication.credentials' :
+                              contextFile.demoCredentials ? 'demoCredentials' : 'none';
+        console.log(`🔍 [TestRunner] Credentials found at: ${credsLocation}`);
       } catch (error) {
         console.error('[TestRunner] Failed to load context file:', error);
       }
     } else {
       console.log(`ℹ️  [TestRunner] No context file found. Tried: ${contextPath}${port ? ` and context/${domain}.json` : ''}`);
+    }
+
+    // Detect if exploration successfully authenticated
+    // If we have pages beyond login/signin pages, exploration likely logged in
+    const loginPagePatterns = ['/login', '/signin', '/sign-in', '/auth', 'cognito'];
+    const authenticatedPages = pages.filter(p => {
+      const urlLower = p.url.toLowerCase();
+      return !loginPagePatterns.some(pattern => urlLower.includes(pattern));
+    });
+    const explorationAuthenticated = authenticatedPages.length > 1; // More than just the landing page
+
+    if (explorationAuthenticated) {
+      console.log(`✅ [TestRunner] Exploration authenticated - ${authenticatedPages.length} authenticated pages found`);
+      siteContext.explorationAuthenticated = true;
+    } else {
+      console.log(`ℹ️ [TestRunner] Exploration did not authenticate or only visited public pages`);
+      siteContext.explorationAuthenticated = false;
     }
 
     // Debug: Log what we're about to pass to test generator
@@ -263,96 +344,372 @@ export async function runTestAnalysis(
 
     // Generate test cases with full site context
     const testCaseGenerator = new TestCaseGenerator(config, visionService);
-    const testCases = await testCaseGenerator.generateTestCases(pages, url, siteContext);
-    
-    // Ensure reasoning log is written (formatReasoningLog is called in outputGenerator.generateReport)
-    // But we need to make sure it happens
 
-    // Save test cases
-    const testCasesContent = testCaseGenerator.formatTestCases(testCases);
-    const testCasesPath = join(runFolder, 'test-cases.md');
-    await writeFile(testCasesPath, testCasesContent, 'utf-8');
-    await updateProgress('generating_tests', `Generated ${testCases.length} test cases`, { testCaseCount: testCases.length });
+    let results: any[] = [];
+    let passCount = 0;
+    let failCount = 0;
 
-    await updateProgress('executing', `Executing ${testCases.length} test cases...`, { 
-      totalTests: testCases.length,
-      completedTests: 0,
-      passedTests: 0,
-      failedTests: 0
-    });
+    if (explorationMode === 'hybrid') {
+      // ========================================
+      // HYBRID MODE: MCP exploration + Scripted execution with refs
+      // Fast, cheap, self-healing with AI rescue
+      // ========================================
+      console.log('[TestRunner] Using HYBRID mode: MCP exploration + scripted execution');
 
-    // Execute test cases
-    const page = engine.getPage();
-    if (!page) {
-      throw new Error('Page not initialized');
+      // Generate hybrid test cases with MCP refs
+      const hybridTestCases = await testCaseGenerator.generateHybridTestCases(
+        pages,
+        url,
+        siteContext,
+        mcpExplorer?.getMCPClient()
+      );
+
+      // Save the test cases
+      const testCasesContent = testCaseGenerator.formatHybridTestCases(hybridTestCases);
+      const testCasesPath = join(runFolder, 'test-cases.md');
+      await writeFile(testCasesPath, testCasesContent, 'utf-8');
+      await updateProgress('generating_tests', `Generated ${hybridTestCases.length} hybrid test cases${!executeTests ? ' (execution skipped)' : ''}`, { testCaseCount: hybridTestCases.length });
+
+      if (executeTests) {
+        // Sort by priority and apply limit
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        const sortedTests = [...hybridTestCases].sort((a, b) => {
+          const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 1;
+          const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 1;
+          return aPriority - bPriority;
+        });
+
+        const testsToExecute = maxTestsToExecute > 0
+          ? sortedTests.slice(0, maxTestsToExecute)
+          : sortedTests;
+
+        await updateProgress('executing', `Executing ${testsToExecute.length} tests with hybrid executor...`, {
+          totalTests: testsToExecute.length,
+          completedTests: 0,
+          passedTests: 0,
+          failedTests: 0
+        });
+
+        // Use Hybrid Executor - reuses MCP client from exploration
+        const hybridExecutor = new HybridTestExecutor(
+          config,
+          {
+            outputDir: runFolder,
+            screenshotDir: screenshotsDir,
+            headless,
+            contextFile: siteContext.contextFile,
+            enableAIRescue: true,
+          },
+          mcpExplorer?.getMCPClient()  // Reuse the MCP client (keeps auth session)
+        );
+
+        try {
+          const hybridResults = await hybridExecutor.executeAll(testsToExecute);
+
+          // Convert HybridTestResult to result format
+          for (const result of hybridResults) {
+            results.push({
+              testCaseId: result.testCase.id,
+              testCaseName: result.testCase.name,
+              testCaseDescription: result.testCase.description,
+              status: result.status,
+              duration: result.duration,
+              error: result.failureReason,
+              steps: result.stepResults.map(sr => ({
+                stepNumber: sr.step.stepNumber,
+                description: sr.step.description,
+                action: sr.step.action,
+                status: sr.status,
+                error: sr.error,
+                resolvedBy: sr.resolvedBy,
+                screenshot: sr.screenshot,
+              })),
+              verificationDetails: result.verificationResults.map(vr => ({
+                what: vr.verification.description || `Verify ${vr.verification.type}: ${vr.verification.expected}`,
+                expected: vr.verification.expected,
+                actual: vr.actual || 'N/A',
+                match: vr.passed,
+                details: {
+                  // Include evidence from hybrid executor for better debugging
+                  contentPreview: vr.evidence,
+                },
+              })),
+              usedAIRescue: result.usedAIRescue,
+              executedAt: result.executedAt,
+              evidence: result.screenshots,
+            });
+          }
+
+          // Update progress with final counts
+          await updateProgress('executing', `Completed ${testsToExecute.length} tests`, {
+            totalTests: testsToExecute.length,
+            completedTests: testsToExecute.length,
+            passedTests: results.filter(r => r.status === 'passed').length,
+            failedTests: results.filter(r => r.status === 'failed').length
+          });
+
+          console.log(`[TestRunner] Hybrid execution complete. AI Rescue used: ${hybridResults.filter(r => r.usedAIRescue).length} tests`);
+
+        } finally {
+          // MCP client cleanup will be handled when mcpExplorer is done
+        }
+      }
+
+    } else if (explorationMode === 'mcp') {
+      // ========================================
+      // MCP MODE: AI-driven intent-based testing
+      // ========================================
+      console.log('[TestRunner] Using MCP mode: generating intent-based tests for AI-driven execution');
+
+      // Generate intent-based test cases (planning phase - what to test)
+      const intentTestCases = await testCaseGenerator.generateIntentTestCases(pages, url, siteContext);
+
+      // Save the test plan (intents only - before execution)
+      const testPlanContent = testCaseGenerator.formatIntentTestCases(intentTestCases);
+      const testPlanPath = join(runFolder, 'test-plan.md');
+      await writeFile(testPlanPath, testPlanContent, 'utf-8');
+      await updateProgress('generating_tests', `Generated ${intentTestCases.length} intent-based test cases${!executeTests ? ' (execution skipped)' : ''}`, { testCaseCount: intentTestCases.length });
+
+      if (executeTests) {
+        // Sort by priority and apply limit
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        const sortedTests = [...intentTestCases].sort((a, b) => {
+          const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 1;
+          const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 1;
+          return aPriority - bPriority;
+        });
+
+        const testsToExecute = maxTestsToExecute > 0
+          ? sortedTests.slice(0, maxTestsToExecute)
+          : sortedTests;
+
+        await updateProgress('executing', `Executing ${testsToExecute.length} tests with AI-driven MCP executor...`, {
+          totalTests: testsToExecute.length,
+          completedTests: 0,
+          passedTests: 0,
+          failedTests: 0
+        });
+
+        // Use MCP Test Executor for AI-driven execution
+        const mcpExecutor = new MCPTestExecutor(config, {
+          headless,
+          screenshotDir: screenshotsDir,
+          evidenceDir,
+          contextFile: siteContext.contextFile,
+        });
+
+        try {
+          await mcpExecutor.initialize();
+
+          for (let i = 0; i < testsToExecute.length; i++) {
+            const testCase = testsToExecute[i];
+            await updateProgress('executing', `Executing test ${i + 1}/${testsToExecute.length}: ${testCase.name}`, {
+              totalTests: testsToExecute.length,
+              completedTests: i,
+              currentTest: testCase.name,
+              passedTests: results.filter(r => r.status === 'passed').length,
+              failedTests: results.filter(r => r.status === 'failed').length
+            });
+
+            const result = await mcpExecutor.executeTest(testCase);
+
+            // Convert IntentTestResult to a format compatible with existing result handling
+            results.push({
+              testCaseId: result.testCase.id,
+              testCaseName: result.testCase.name,
+              status: result.status,
+              duration: result.duration,
+              error: result.failureReason,
+              steps: result.executionLog.map(step => ({
+                stepNumber: step.stepNumber,
+                description: `${step.action} ${step.target || ''} - ${step.reasoning}`,
+                action: step.action,
+                status: step.success ? 'passed' : 'failed',
+                error: step.error,
+              })),
+              verifications: result.verifications,
+              aiAssessment: result.aiAssessment,
+              executedAt: new Date(),
+            });
+
+            await updateProgress('executing', `Completed test ${i + 1}/${testsToExecute.length}`, {
+              totalTests: testsToExecute.length,
+              completedTests: i + 1,
+              passedTests: results.filter(r => r.status === 'passed').length,
+              failedTests: results.filter(r => r.status === 'failed').length
+            });
+          }
+
+          const tokenUsage = mcpExecutor.getTokenUsage();
+          console.log(`[TestRunner] MCP Executor token usage: ${tokenUsage.input} input, ${tokenUsage.output} output`);
+
+          // Generate nicely formatted test cases from execution results (post-run)
+          // This shows what the AI actually did during testing
+          const executedResults: IntentTestResult[] = results.map(r => ({
+            testCase: intentTestCases.find(tc => tc.id === r.testCaseId) || {
+              id: r.testCaseId,
+              name: r.testCaseName,
+              description: '',
+              intent: '',
+              successCriteria: [],
+              priority: 'medium' as const,
+              category: 'general',
+            },
+            status: r.status as 'passed' | 'failed' | 'blocked',
+            executionLog: r.steps?.map((s: any) => ({
+              stepNumber: s.stepNumber,
+              action: s.action || 'unknown',
+              target: s.target,
+              value: s.value,
+              reasoning: s.description || s.reasoning || '',
+              success: s.status === 'passed',
+              error: s.error,
+              timestamp: new Date(),
+            })) || [],
+            verifications: r.verifications || [],
+            aiAssessment: r.aiAssessment || '',
+            screenshots: [],
+            failureReason: r.error,
+            duration: r.duration || 0,
+          }));
+
+          // Save the nicely formatted test cases (showing what AI actually did)
+          const testCasesContent = testCaseGenerator.formatExecutedTestCases(executedResults);
+          const testCasesPath = join(runFolder, 'test-cases.md');
+          await writeFile(testCasesPath, testCasesContent, 'utf-8');
+          console.log(`[TestRunner] Saved executed test cases to ${testCasesPath}`);
+
+        } finally {
+          await mcpExecutor.close();
+        }
+      }
+
+    } else {
+      // ========================================
+      // VISION MODE: Traditional scripted testing
+      // ========================================
+      const testCases = await testCaseGenerator.generateTestCases(pages, url, siteContext);
+
+      // Save test cases
+      const testCasesContent = testCaseGenerator.formatTestCases(testCases);
+      const testCasesPath = join(runFolder, 'test-cases.md');
+      await writeFile(testCasesPath, testCasesContent, 'utf-8');
+      await updateProgress('generating_tests', `Generated ${testCases.length} test cases${!executeTests ? ' (execution skipped)' : ''}`, { testCaseCount: testCases.length });
+
+      if (executeTests) {
+        await updateProgress('executing', `Executing ${testCases.length} test cases...`, {
+          totalTests: testCases.length,
+          completedTests: 0,
+          passedTests: 0,
+          failedTests: 0
+        });
+
+        // For test execution, we need a Playwright page
+        if (!engine) {
+          console.log('[TestRunner] Initializing AutomationEngine for test execution...');
+          engine = new AutomationEngine(config);
+          await engine.initialize(screenshotsDir);
+          await engine.getPage()?.goto(url);
+        }
+
+        const page = engine?.getPage();
+        if (!page) {
+          throw new Error('Page not initialized');
+        }
+
+        const executor = new TestExecutor(page, evidenceDir);
+
+        // Sort tests by priority and apply execution limit
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        const sortedTests = [...testCases].sort((a, b) => {
+          const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 1;
+          const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 1;
+          return aPriority - bPriority;
+        });
+
+        const testsToExecute = maxTestsToExecute > 0
+          ? sortedTests.slice(0, maxTestsToExecute)
+          : sortedTests;
+
+        if (maxTestsToExecute > 0 && testCases.length > maxTestsToExecute) {
+          console.log(`🎯 Executing ${testsToExecute.length}/${testCases.length} tests (limited by maxTestsToExecute=${maxTestsToExecute}, sorted by priority)`);
+        }
+
+        const totalGenerated = testCases.length;
+        const totalToExecute = testsToExecute.length;
+
+        for (let i = 0; i < testsToExecute.length; i++) {
+          const testCase = testsToExecute[i];
+          await updateProgress('executing', `Executing test ${i + 1}/${totalToExecute}: ${testCase.name}`, {
+            totalTests: totalToExecute,
+            totalGenerated: totalGenerated,
+            completedTests: i,
+            currentTest: testCase.name,
+            passedTests: results.filter(r => r.status === 'passed').length,
+            failedTests: results.filter(r => r.status === 'failed').length
+          });
+
+          const result = await executor.executeTestCase(testCase);
+          results.push(result);
+
+          await updateProgress('executing', `Completed test ${i + 1}/${totalToExecute}`, {
+            totalTests: totalToExecute,
+            totalGenerated: totalGenerated,
+            completedTests: i + 1,
+            passedTests: results.filter(r => r.status === 'passed').length,
+            failedTests: results.filter(r => r.status === 'failed').length
+          });
+        }
+      }
     }
 
-    const executor = new TestExecutor(page, evidenceDir);
+    // Restore original console methods now that execution is complete
+    console.log = originalConsoleLog;
+    console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
 
-    // Sort tests by priority and apply execution limit
-    const priorityOrder = { high: 0, medium: 1, low: 2 };
-    const sortedTests = [...testCases].sort((a, b) => {
-      const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 1;
-      const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 1;
-      return aPriority - bPriority;
-    });
+    if (executeTests) {
+      // Format and save results
+      const resultsFormatter = new TestResultsFormatter(runFolder);
+      await resultsFormatter.saveResults(results);
 
-    // Apply maxTestsToExecute limit (0 = all)
-    const testsToExecute = maxTestsToExecute > 0
-      ? sortedTests.slice(0, maxTestsToExecute)
-      : sortedTests;
+      // Generate final report with test results (this also formats the reasoning log)
+      await outputGenerator.generateReport(pages, url, results);
 
-    if (maxTestsToExecute > 0 && testCases.length > maxTestsToExecute) {
-      console.log(`🎯 Executing ${testsToExecute.length}/${testCases.length} tests (limited by maxTestsToExecute=${maxTestsToExecute}, sorted by priority)`);
-    }
-
-    // Execute tests with progress updates
-    const results: any[] = [];
-    const totalGenerated = testCases.length;
-    const totalToExecute = testsToExecute.length;
-
-    for (let i = 0; i < testsToExecute.length; i++) {
-      const testCase = testsToExecute[i];
-      await updateProgress('executing', `Executing test ${i + 1}/${totalToExecute}: ${testCase.name}`, {
-        totalTests: totalToExecute,
-        totalGenerated: totalGenerated,
-        completedTests: i,
-        currentTest: testCase.name,
-        passedTests: results.filter(r => r.status === 'passed').length,
-        failedTests: results.filter(r => r.status === 'failed').length
+      // Update progress - completed
+      passCount = results.filter((r: any) => r.status === 'passed').length;
+      failCount = results.filter((r: any) => r.status === 'failed').length;
+      await updateProgress('completed', `Test run completed: ${passCount} passed, ${failCount} failed`, {
+        testCount: results.length,
+        passCount,
+        failCount,
+        success: failCount === 0
       });
+    } else {
+      // Generate final report without test results
+      await outputGenerator.generateReport(pages, url, []);
 
-      const result = await executor.executeTestCase(testCase);
-      results.push(result);
-
-      await updateProgress('executing', `Completed test ${i + 1}/${totalToExecute}`, {
-        totalTests: totalToExecute,
-        totalGenerated: totalGenerated,
-        completedTests: i + 1,
-        passedTests: results.filter(r => r.status === 'passed').length,
-        failedTests: results.filter(r => r.status === 'failed').length
+      await updateProgress('completed', 'Exploration and test generation completed (execution skipped)', {
+        testCount: 0,
+        passCount: 0,
+        failCount: 0,
+        executionSkipped: true,
+        success: true
       });
     }
-
-    // Format and save results
-    const resultsFormatter = new TestResultsFormatter(runFolder);
-    await resultsFormatter.saveResults(results);
-
-    // Generate final report with test results (this also formats the reasoning log)
-    await outputGenerator.generateReport(pages, url, results);
-
-    // Update progress - completed
-    const passCount = results.filter((r: any) => r.status === 'passed').length;
-    const failCount = results.filter((r: any) => r.status === 'failed').length;
-    await updateProgress('completed', `Test run completed: ${passCount} passed, ${failCount} failed`, {
-      testCount: results.length,
-      passCount,
-      failCount,
-      success: failCount === 0
-    });
 
     // Cleanup
-    await engine.cleanup();
+    if (engine) {
+      await engine.cleanup();
+    }
+    if (mcpExplorer && explorationMode === 'hybrid') {
+      // Close MCP client that was kept alive for hybrid execution
+      const mcpClient = mcpExplorer.getMCPClient();
+      if (mcpClient) {
+        await mcpClient.close();
+        await mcpClient.disconnect();
+      }
+    }
 
     const finalRunId = runId || runFolder.split('/').pop() || 'unknown';
     
